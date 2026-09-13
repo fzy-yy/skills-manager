@@ -179,9 +179,14 @@ export const useAppStore = defineStore("app", () => {
    *
    * @param {() => Promise<object>} operation - 实际调用 preload 服务的函数
    * @param {string} [successMessage] - 成功提示文案；若存在 error 级问题则不提示成功
+   * @param {{reportResultIssues?: boolean}} [options] - 是否逐条展示服务端返回的问题
    * @returns {Promise<object>} preload 服务返回的最新状态
    */
-  async function execute(operation, successMessage) {
+  async function execute(
+    operation,
+    successMessage,
+    { reportResultIssues = true } = {},
+  ) {
     if (operationInFlight) {
       const error = new Error("已有操作正在进行，请等待完成后再试");
       notify(error.message, "warning");
@@ -194,7 +199,8 @@ export const useAppStore = defineStore("app", () => {
       await waitForRender();
       const result = await operation();
       if (result) applyState(result);
-      const issues = reportIssues(result?.issues);
+      const issues = Array.isArray(result?.issues) ? result.issues : [];
+      if (reportResultIssues) reportIssues(issues);
       // 存在 error 级问题时不再提示成功，避免“成功”与“失败”同时出现造成误导。
       if (successMessage && !issues.some((issue) => issue?.type === "error"))
         notify(successMessage);
@@ -247,9 +253,12 @@ export const useAppStore = defineStore("app", () => {
     pendingGroupSyncs.delete(agentId);
     groupSyncFlushing = true;
     try {
+      // 开关属于高频操作：静默处理成功与逐 Skill 检查结果，避免右下角提示堆积。
+      // 接口直接抛出的致命错误仍由 execute 统一展示一条错误提示。
       const result = await execute(
         () => api().setAgentGroups(agentId, pending.groupIds),
-        "链接配置已同步",
+        undefined,
+        { reportResultIssues: false },
       );
       pending.waiters.forEach(({ resolve }) => resolve(result));
     } catch (error) {
