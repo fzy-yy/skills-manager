@@ -1,0 +1,14 @@
+{
+  "main": "index.html",
+  "preload": "preload/services.js",
+  "logo": "logo.png",
+  "development": { "main": "http://localhost:5173" },
+  "pluginSetting": { "single": true, "height": 680 },
+  "features": [
+    {
+      "code": "skills-manager",
+      "explain": "管理统一 Skills 仓库、分组与 Agent 链接",
+      "cmds": ["Skills 管理器", "技能管理", "Agent Skills"]
+    }
+  ]
+}

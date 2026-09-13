@@ -1,0 +1,72 @@
+@import "tailwindcss";
+
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* 颜色只在令牌层定义，组件内全部通过 Tailwind 语义类使用。 */
+:root {
+  --ui-primary: #2563eb;
+  --ui-primary-hover: #1d4ed8;
+  --ui-primary-soft: #eff6ff;
+  --ui-primary-border: #bfdbfe;
+  --ui-on-primary: #ffffff;
+  --ui-control-thumb: #ffffff;
+  --ui-canvas: #f6f8fc;
+  --ui-surface: #ffffff;
+  --ui-surface-raised: #ffffff;
+  --ui-border: #dde3ec;
+  --ui-border-strong: #cbd4e1;
+  --ui-ink: #172033;
+  --ui-ink-secondary: #596579;
+  --ui-ink-muted: #8b96a8;
+  --ui-danger: #dc2626;
+  --ui-danger-soft: #fef2f2;
+  --ui-warning: #a16207;
+  --ui-warning-soft: #fefce8;
+  --ui-overlay: rgb(15 23 42 / 45%);
+}
+
+.dark {
+  color-scheme: dark;
+  --ui-primary: #60a5fa;
+  --ui-primary-hover: #3b82f6;
+  --ui-primary-soft: #172554;
+  --ui-primary-border: #1e40af;
+  --ui-on-primary: #ffffff;
+  --ui-control-thumb: #f8fafc;
+  --ui-canvas: #0f172a;
+  --ui-surface: #172033;
+  --ui-surface-raised: #1e293b;
+  --ui-border: #2d3a4f;
+  --ui-border-strong: #475569;
+  --ui-ink: #f1f5f9;
+  --ui-ink-secondary: #cbd5e1;
+  --ui-ink-muted: #94a3b8;
+  --ui-danger: #f87171;
+  --ui-danger-soft: #451a1a;
+  --ui-warning: #facc15;
+  --ui-warning-soft: #422006;
+  --ui-overlay: rgb(2 6 23 / 70%);
+}
+
+@theme inline {
+  --color-primary: var(--ui-primary);
+  --color-primary-hover: var(--ui-primary-hover);
+  --color-primary-soft: var(--ui-primary-soft);
+  --color-primary-border: var(--ui-primary-border);
+  --color-on-primary: var(--ui-on-primary);
+  --color-control-thumb: var(--ui-control-thumb);
+  --color-canvas: var(--ui-canvas);
+  --color-surface: var(--ui-surface);
+  --color-surface-raised: var(--ui-surface-raised);
+  --color-border: var(--ui-border);
+  --color-border-strong: var(--ui-border-strong);
+  --color-ink: var(--ui-ink);
+  --color-ink-secondary: var(--ui-ink-secondary);
+  --color-ink-muted: var(--ui-ink-muted);
+  --color-danger: var(--ui-danger);
+  --color-danger-soft: var(--ui-danger-soft);
+  --color-warning: var(--ui-warning);
+  --color-warning-soft: var(--ui-warning-soft);
+  --color-overlay: var(--ui-overlay);
+  --font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
+}
