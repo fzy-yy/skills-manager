@@ -86,20 +86,26 @@ export const useAppStore = defineStore('app', () => {
     }
   }
 
-  async function toggleTheme () {
-    const nextTheme = theme.value === 'dark' ? 'light' : 'dark'
+  async function setTheme (nextTheme) {
+    if (nextTheme !== 'light' && nextTheme !== 'dark') return false
     document.documentElement.classList.toggle('dark', nextTheme === 'dark')
     theme.value = nextTheme
     try {
       if (window.skillsManager) applyState(await api().setTheme(nextTheme))
+      return true
     } catch (error) {
       notify(error.message, 'error')
+      return false
     }
+  }
+
+  function toggleTheme () {
+    return setTheme(theme.value === 'dark' ? 'light' : 'dark')
   }
 
   return {
     repositoryPath, skills, groups, agents, enabledGroups, theme, ready, busy, notice, dialog, hasRepository,
-    initialize, toggleTheme, notify, confirm, resolveDialog,
+    initialize, setTheme, toggleTheme, notify, confirm, resolveDialog,
     dismissNotice: () => { notice.value = null },
     chooseDirectory: current => api().chooseDirectory(current),
     setRepository: directory => execute(() => api().setRepository(directory), 'Skills 仓库已更新'),

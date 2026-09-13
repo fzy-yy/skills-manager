@@ -1,5 +1,5 @@
 <script setup>
-import { Bot, Database, Layers3, Link2, X, Check, CircleAlert } from '@lucide/vue'
+import { Bot, Database, Layers3, Link2, Settings2, X, Check, CircleAlert } from '@lucide/vue'
 import { onMounted } from 'vue'
 import { RouterLink, RouterView, useRouter } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -11,7 +11,8 @@ const tabs = [
   { path: '/skills', label: 'Skills 仓库', icon: Database },
   { path: '/groups', label: '分组管理', icon: Layers3 },
   { path: '/applications', label: '应用配置', icon: Link2 },
-  { path: '/agents', label: 'Agents', icon: Bot }
+  { path: '/agents', label: 'Agents', icon: Bot },
+  { path: '/settings', label: '设置', icon: Settings2 }
 ]
 
 onMounted(() => {
@@ -29,7 +30,7 @@ onMounted(() => {
           v-for="tab in tabs"
           :key="tab.path"
           :to="tab.path"
-          class="relative flex min-w-[118px] items-center justify-center gap-2 px-4 font-bold text-ink-secondary hover:bg-canvas hover:text-ink max-[760px]:min-w-0 max-[760px]:px-3"
+          class="relative flex min-w-[108px] items-center justify-center gap-2 px-3 font-bold text-ink-secondary hover:bg-canvas hover:text-ink max-[760px]:min-w-0 max-[760px]:px-2"
           active-class="text-primary after:absolute after:right-3 after:bottom-0 after:left-3 after:h-0.5 after:bg-primary"
         ><component :is="tab.icon" :size="17" :stroke-width="1.8" /><span>{{ tab.label }}</span></RouterLink>
       </nav>
