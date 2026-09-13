@@ -2,7 +2,6 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const CONFIG_VERSION = 1
-const LEGACY_CONFIG_FILE = path.join(window.utools.getPath('userData'), 'skills-manager', 'config.json')
 const STORAGE_KEYS = Object.freeze({
   version: 'skills-manager/version',
   repositoryPath: 'skills-manager/repository-path',
@@ -35,14 +34,6 @@ function writeConfig (config) {
   })
 }
 
-function removeLegacyConfig () {
-  ;[LEGACY_CONFIG_FILE, `${LEGACY_CONFIG_FILE}.tmp`].forEach(file => {
-    try {
-      if (fs.existsSync(file)) fs.unlinkSync(file)
-    } catch (_) {}
-  })
-}
-
 function readConfig () {
   try {
     const stored = {}
@@ -50,16 +41,7 @@ function readConfig () {
       stored[field] = window.utools.dbStorage.getItem(key)
     })
     const hasDatabaseData = Object.values(stored).some(value => value !== null && value !== undefined)
-    if (hasDatabaseData) return normalizeConfig(stored)
-
-    // 首次升级时迁移旧 JSON；数据库写入完成后再删除旧文件。
-    if (fs.existsSync(LEGACY_CONFIG_FILE)) {
-      const legacyConfig = normalizeConfig(JSON.parse(fs.readFileSync(LEGACY_CONFIG_FILE, 'utf8')))
-      writeConfig(legacyConfig)
-      if (window.utools.dbStorage.getItem(STORAGE_KEYS.version) === legacyConfig.version) removeLegacyConfig()
-      return legacyConfig
-    }
-    return createDefaultConfig()
+    return hasDatabaseData ? normalizeConfig(stored) : createDefaultConfig()
   } catch (error) {
     throw new Error(`读取本地数据库失败：${error.message}`)
   }
@@ -67,7 +49,6 @@ function readConfig () {
 
 function clearStoredConfig () {
   Object.values(STORAGE_KEYS).forEach(key => window.utools.dbStorage.removeItem(key))
-  removeLegacyConfig()
 }
 
 function normalizeDirectory (directory) {
