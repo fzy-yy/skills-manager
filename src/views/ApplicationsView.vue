@@ -178,10 +178,10 @@ async function setSkill(skillId, enabled) {
       <!-- 双栏配置区：左侧分组批量开关，右侧全部 Skills 单项开关。 -->
       <!-- 窄窗口（<760px）自动折成单列，避免两列都被挤压到无法阅读 -->
       <div
-        class="mt-4 grid grid-cols-2 items-start gap-4 max-[760px]:grid-cols-1"
+        class="mt-4 grid grid-cols-[minmax(0,1fr)_minmax(0,1fr)] items-start gap-4 max-[760px]:grid-cols-1"
       >
         <section
-          class="grid overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
+          class="grid min-w-0 overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
         >
           <header
             class="flex min-h-14 items-center gap-2 border-b border-border px-4"
@@ -199,7 +199,7 @@ async function setSkill(skillId, enabled) {
             <div
               v-for="group in store.groups"
               :key="group.id"
-              class="flex min-h-16.5 items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+              class="grid min-h-16.5 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
             >
               <div
                 class="grid size-9.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
@@ -215,6 +215,7 @@ async function setSkill(skillId, enabled) {
               <!-- 开启时批量加入组内 Skills；关闭时批量移除。 -->
               <!-- busy 期间禁用：避免上一轮链接同步未结束时又排入新请求；空分组也禁用 -->
               <ToggleSwitch
+                class="justify-self-end"
                 :model-value="activeGroupIdSet.has(group.id)"
                 :disabled="store.busy || !group.skillIds.length"
                 :label="`${group.name} 分组开关`"
@@ -231,7 +232,7 @@ async function setSkill(skillId, enabled) {
         </section>
 
         <section
-          class="grid overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
+          class="grid min-w-0 overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
         >
           <header
             class="flex min-h-14 items-center gap-2 border-b border-border px-4"
@@ -249,7 +250,7 @@ async function setSkill(skillId, enabled) {
             <div
               v-for="skill in store.skills"
               :key="skill.id"
-              class="flex min-h-14 items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0"
+              class="grid min-h-14 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0"
             >
               <div
                 class="grid size-8.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
@@ -261,6 +262,7 @@ async function setSkill(skillId, enabled) {
               }}</strong>
               <!-- 受控开关：状态完全来自 store，开启/关闭由 setSkill 提交最终集合 -->
               <ToggleSwitch
+                class="justify-self-end"
                 :model-value="activeSkillSet.has(skill.id)"
                 :disabled="store.busy"
                 :label="`${skill.name} Skill 开关`"
