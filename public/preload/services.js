@@ -32,9 +32,13 @@ const STATE_KEY = "skills-manager/state-v2";
 const FILE_READ_TIMEOUT_MS = 15_000;
 // 扫描边界：防止误选磁盘根目录或超大目录后无限遍历，数值足以覆盖正常 Skills 仓库。
 const MAX_SCAN_DIRECTORIES = 20_000;
+// 目录层级上限：仓库里若存在超深目录或（未被跳过的）软链接套娃，在此处止损。
 const MAX_SCAN_DEPTH = 64;
+// 单次扫描的总时长上限：网络盘、机械盘遍历很慢时主动放弃，避免 uTools 窗口长时间无响应。
 const MAX_SCAN_DURATION_MS = 30_000;
+// 单次扫描最多逐条展示的问题数：超出部分合并为一条汇总提示，防止提示区被刷屏。
 const MAX_SCAN_ISSUES = 50;
+// 单个 SKILL.md 允许的最大体积：超过则拒绝读取，避免把超大文件当元数据解析拖垮内存。
 const MAX_SKILL_FILE_BYTES = 2 * 1024 * 1024;
 // 仅用于把当前开发阶段已经产生的 v1 数据迁移到单文档结构，不涉及旧 JSON 文件。
 const LEGACY_STORAGE_KEYS = Object.freeze({
@@ -142,9 +146,13 @@ async function pathExists(target) {
   }
 }
 
+// 为什么需要这个函数：缓存来自上一次完整扫描，用于首屏秒开，但必须假设它可能来自旧版本、
+// 被手工改坏或与磁盘现状不一致；因此这里只接受「字段齐全 + folderName 为单层目录名 + id 唯一」的记录，
+// 非法项直接丢弃。缓存只服务于展示与目标定位，真正的删除决策仍以本轮完整扫描为准。
 /** 规范化缓存的 Skill 扫描结果，缓存仅用于首屏展示，不参与未校验的删除决策。 */
 function normalizeCachedSkills(input) {
   if (!Array.isArray(input)) return [];
+  // ids 用于去重：同一 id 重复出现时只保留第一条，避免前端列表出现重复项。
   const ids = new Set();
   return input.flatMap((item) => {
     if (!isPlainObject(item)) return [];
@@ -205,6 +213,8 @@ function normalizeManagedLinks(input) {
             linkPath: link.linkPath,
             sourcePath: link.sourcePath,
             ...(identity ? { identity } : {}),
+            // pending 表示「已写入数据库检查点、但尚未确认创建成功」的链接：
+            // 崩溃恢复时若链接已存在则补齐文件标识，若不存在则按普通缺失流程处理。
             ...(link.pending === true ? { pending: true } : {}),
           },
         ],
@@ -213,6 +223,10 @@ function normalizeManagedLinks(input) {
   );
 }
 
+// 「分组与 Skills 双向联动」的一致性保证：分组只是界面上的批量选择器，
+// 真正的启用状态始终以 enabledSkills 为准。这样分组被改名、增删 Skills 之后，
+// 开关状态会按“分组内容是否被完整覆盖”自动重算，不会出现勾选状态与链接不一致。
+// 判定规则：分组必须非空，且其包含的每一个 Skill 都被启用，才算该分组处于开启状态。
 /** 根据启用的 Skill 集合推导完整覆盖的分组，空分组不视为已启用。 */
 function deriveEnabledGroupIds(groups, skillIds) {
   const enabledSkillIds = new Set(skillIds);
@@ -225,6 +239,9 @@ function deriveEnabledGroupIds(groups, skillIds) {
     .map((group) => group.id);
 }
 
+// 仅用于旧数据迁移：早期版本只保存「已启用分组」，这里把它展开为等价的 Skill 集合，
+// 使升级后用户已有的选择不丢失。展开是一次性的：之后分组内容再变化也不会影响这份选择，
+// 避免用户调整分组时“顺带”改变其他设备的链接配置。
 /** 把旧的分组启用关系转换为 Skill 集合，兼容当前开发阶段已经保存的数据。 */
 function deriveSkillIdsFromGroups(groups, groupIds) {
   const enabledGroupIds = new Set(groupIds);
@@ -300,6 +317,7 @@ function normalizeConfig(input) {
       ? config.enabledGroups
       : {};
   agents.forEach((agent) => {
+    // 旧结构：先从 enabledGroups 还原出分组 id（并丢弃已不存在的分组），再展开为 Skill 集合。
     const legacyGroupIds = [
       ...new Set(
         (Array.isArray(storedEnabledGroups[agent.id])
@@ -315,7 +333,9 @@ function normalizeConfig(input) {
           : deriveSkillIdsFromGroups(groups, legacyGroupIds)
         ).map(String),
       ),
+    // filter(Boolean) 兜底剔除空字符串 id，避免脏数据进入启用集合。
     ].filter(Boolean);
+    // 反向推导分组开关状态，保证返回给前端的 enabledGroups 与 enabledSkills 永远自洽。
     enabledGroups[agent.id] = deriveEnabledGroupIds(
       groups,
       enabledSkills[agent.id],
@@ -349,6 +369,9 @@ function database() {
   return storage;
 }
 
+// 为什么需要设备隔离：uTools 本地数据库会随账号在多台设备间同步，但「绝对路径」和
+// 链接的 inode/创建时间只在本机有意义。若把其他设备的路径拿到本机直接使用，
+// 轻则同步失败，重则可能在错误目录里创建或删除链接，因此本机相关数据全部按设备 ID 分区存放。
 /** 获取稳定的本机标识，用于隔离不可跨设备复用的链接路径与文件标识。 */
 function nativeId() {
   const id = window.utools?.getNativeId?.();
@@ -356,16 +379,23 @@ function nativeId() {
   return String(id);
 }
 
+// 配置校验的基础判断：数组与 null 都不算「普通对象」，避免后续对数组做键值遍历造成误判。
 /** 判断值是否为可枚举键值对象（排除 null 与数组）。 */
 function isPlainObject(value) {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
+// 配置里的键最终会作为普通对象属性使用（如 enabledSkills[agentId]），
+// 若键为 __proto__ / prototype / constructor 会引起原型链污染，因此这类 id 一律拒绝。
 /** 判断字符串能否安全用作普通对象的业务键，避免原型属性污染配置映射。 */
 function isSafeRecordKey(value) {
   return !["__proto__", "prototype", "constructor"].includes(value);
 }
 
+// 运行期上下文（_issues/_syncLocked/_deviceId/_deviceStates/_orphanAgents/_cachedSkills 等）
+// 只在内存中使用：用 defineProperty 定义为不可枚举属性，这样写入数据库时
+// 会被 JSON 序列化自动忽略，不会污染持久化的配置结构。
+// writable 设为 true，便于 refreshState 等流程就地更新缓存与待清理项。
 /** 为配置附加不会写入业务字段的运行期上下文。 */
 function attachRuntime(config, context) {
   Object.entries(context).forEach(([key, value]) => {
@@ -382,9 +412,13 @@ function attachRuntime(config, context) {
  * 深度校验同步配置与本机链接状态。任何可能改变链接集合的嵌套异常都会进入只读保护，
  * 绝不再把损坏的数组静默当成空数组执行删除。
  */
+// 校验总原则：这里只做「只读体检」，绝不修改数据库或磁盘；发现任何可能影响链接集合的异常，
+// 都通过 fail() 打开只读保护开关，让后续流程只观察、不清理。
 async function validateStoredState(stored, deviceState, legacy = false) {
+  // issues 汇总所有问题；locked 一旦置真就不再恢复：宁可少动文件，也不冒误删风险。
   const issues = [];
   let locked = false;
+  // 统一的问题构造入口：错误文案都会带上「只读保护 + 如何恢复」的引导。
   const fail = (message) => {
     locked = true;
     issues.push(
@@ -395,6 +429,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
     );
   };
 
+  // 顶层结构体检：版本号、设备分区、仓库路径、分组、Agent、启用关系逐项校验类型。
   if (!isPlainObject(stored)) fail("本地数据库主配置不是有效对象");
   if (!legacy && stored?.version !== CONFIG_VERSION)
     fail(`不支持的配置版本“${String(stored?.version)}”`);
@@ -410,6 +445,9 @@ async function validateStoredState(stored, deviceState, legacy = false) {
   )
     fail("Skills 启用配置格式异常");
 
+  // 逐条深度校验分组记录：字段类型、非空、id 唯一、skillIds 必须为字符串数组。
+  // 这里不直接把脏记录过滤掉，是因为“少了一条分组”可能被误认为用户删除了分组，
+  // 进而连累 Agent 链接；宁可进入只读保护让用户确认。
   const groupIds = new Set();
   if (Array.isArray(stored?.groups)) {
     stored.groups.forEach((group) => {
@@ -428,6 +466,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
     });
   }
 
+  // 逐条深度校验 Agent 记录：id 合法且唯一、名称非空；目录允许为空（表示当前设备尚未配置）。
   const agentIds = new Set();
   if (Array.isArray(stored?.agents)) {
     stored.agents.forEach((agent) => {
@@ -446,6 +485,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
     });
   }
 
+  // 启用分组必须覆盖每个 Agent（即使是空数组），且引用的分组 id 必须真实存在。
   if (isPlainObject(stored?.enabledGroups)) {
     agentIds.forEach((agentId) => {
       if (!Array.isArray(stored.enabledGroups[agentId]))
@@ -480,6 +520,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
     });
   }
 
+  // 本机分区体检：这部分数据直接决定「删除哪些链接」，因此校验最严格。
   if (!isPlainObject(deviceState) || !isPlainObject(deviceState.agents)) {
     fail("本机链接状态格式异常");
   } else {
@@ -513,6 +554,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
       ) {
         fail(`Agent“${agentId}”包含无效的链接文件标识`);
       }
+      // 收集本机目录，供后面的“两个 Agent 指向同一目录”检查使用。
       if (
         typeof localAgent?.directory === "string" &&
         localAgent.directory.trim()
@@ -520,6 +562,7 @@ async function validateStoredState(stored, deviceState, legacy = false) {
         localDirectories.push(localAgent.directory);
     });
     // 路径别名需要解析真实目录后比较，因此使用异步循环，避免 realpath 阻塞界面。
+    // 采用两两比较（O(n²)）而非去重集合：Agent 数量通常只有个位数，可读性优先于微优化。
     for (let index = 0; index < localDirectories.length; index += 1) {
       for (let other = 0; other < index; other += 1) {
         if (await pathsEqual(localDirectories[index], localDirectories[other])) {
@@ -530,12 +573,16 @@ async function validateStoredState(stored, deviceState, legacy = false) {
     }
   }
 
+  // 主题只影响界面显示，属于可自愈的轻微问题：仅提示，不触发只读保护。
   if (stored?.theme !== "light" && stored?.theme !== "dark") {
     issues.push(createIssue("warning", "本地数据库中的主题值无效，已恢复为浅色主题。"));
   }
   return { issues: uniqueIssues(issues), locked };
 }
 
+// 迁移背景：v1 把 version/repositoryPath/groups/agents/enabledGroups/theme 拆成 6 个键，
+// 一次同步中可能部分写入成功，造成配置撕裂。现在读取时若发现单文档不存在、而旧键有数据，
+// 就临时按旧结构解析，由本文件后续逻辑转换并写入 state-v2；旧键会在清除数据时统一删除。
 /** 读取旧版 dbStorage 多键配置，仅用于一次性迁移当前开发数据。 */
 function readLegacyConfig(storage) {
   const stored = {};
@@ -545,6 +592,10 @@ function readLegacyConfig(storage) {
   return Object.values(stored).some((value) => value != null) ? stored : null;
 }
 
+// 落库格式分为两层：
+//  共享层（groups / agents 的 id 与 name / enabledGroups / enabledSkills / theme）—— 可跨设备同步；
+//  设备层（deviceStates[设备 ID]：仓库路径、Agent 目录、受管链接、扫描缓存）—— 只在本机有效。
+// 这样多设备同步时不会把 A 机的路径写到 B 机，也不会误删 B 机自己的链接。
 /** 把内存配置转换为单文档结构，并只更新当前设备的本地状态分区。 */
 function buildStoredState(
   config,
@@ -554,6 +605,8 @@ function buildStoredState(
   const deviceId = config._deviceId || nativeId();
   const deviceStates = { ...latestDeviceStates };
   const localAgents = {};
+  // 一并写入待清理（orphan）Agent：让“已从共享配置删除、但链接尚未删完”的记录也能持久化，
+  // 崩溃或重启后仍可继续安全清理，避免产生无法追踪的链接。
   [...normalized.agents, ...(config._orphanAgents || [])].forEach((agent) => {
     // 空目录表示该 Agent 尚未在当前设备配置，不生成本机记录。
     if (!agent.directory) return;
@@ -571,6 +624,7 @@ function buildStoredState(
       // 扫描缓存只用于当前设备首屏展示；实际同步前始终重新扫描校验。
       skills: normalizeCachedSkills(config._cachedSkills),
     };
+  // 既没有本机目录又没有仓库路径 → 本机无需记录，删除分区可避免残留空壳数据。
   } else delete deviceStates[deviceId];
 
   return {
@@ -590,22 +644,30 @@ function buildStoredState(
   };
 }
 
+// 原子性保证：所有配置只写 STATE_KEY 一个键，dbStorage 的单次 setItem 不会出现
+// 「新的一半 + 旧的一半」。同时写入前会重新读取数据库中的其他设备分区，
+// 保证多设备并发同步时不会覆盖别的设备刚写入的本机数据。
 /** 单次原子写入全部配置，避免多键循环写入产生部分成功。 */
 function writeConfig(config) {
   try {
     const storage = database();
     // 写入前重新读取最新设备分区，避免本设备用旧快照覆盖其他设备刚保存的本地记录。
     const latest = storage.getItem(STATE_KEY);
+    // 只复用同版本文档的设备分区，避免把未来版或损坏的结构原样写回去。
     const latestDeviceStates =
       latest?.version === CONFIG_VERSION && isPlainObject(latest.deviceStates)
         ? latest.deviceStates
         : config._deviceStates || {};
+    // buildStoredState 会替换“当前设备”分区，其余设备分区原样保留。
     storage.setItem(STATE_KEY, buildStoredState(config, latestDeviceStates));
   } catch (error) {
     throw new Error(`保存本地数据库失败：${errorMessage(error)}`);
   }
 }
 
+// 读取流程：① 取单文档；② 单文档不存在时尝试旧版多键迁移；③ 深度校验（决定是否只读保护）；
+// ④ 把「共享配置」与「本机设备分区」合并成内存 Agent；⑤ 识别本机存在但共享层已删除的 orphan Agent；
+// ⑥ 附加 _issues/_syncLocked/_deviceId/_deviceStates/_orphanAgents/_cachedSkills 等运行期上下文。
 /** 读取单文档配置，并把当前设备的路径与链接记录合并到内存 Agent。 */
 async function readConfig() {
   try {
@@ -633,9 +695,11 @@ async function readConfig() {
     const deviceStates = isPlainObject(stored.deviceStates)
       ? stored.deviceStates
       : {};
+    // 本机首次运行或分区缺失时，给出一份空的本机状态，绝不猜测其他设备的路径。
     let deviceState = isPlainObject(deviceStates[deviceId])
       ? deviceStates[deviceId]
       : { repositoryPath: "", agents: {} };
+    // 旧结构没有设备分区概念：仓库路径与 Agent 目录都视为本机数据，按原字段还原。
     if (legacy) {
       deviceState = {
         repositoryPath: stored.repositoryPath,
@@ -652,7 +716,9 @@ async function readConfig() {
       };
     }
 
+    // 校验只决定 locked 与 issues，不会修改任何共享数据。
     const validation = await validateStoredState(stored, deviceState, legacy);
+    // 合并策略：名称等共享字段取共享层，路径与受管链接只取本机分区（旧结构回退到原字段）。
     const localAgentRecords = isPlainObject(deviceState.agents)
       ? deviceState.agents
       : {};
@@ -682,6 +748,7 @@ async function readConfig() {
             : "",
       agents: mergedAgents,
     });
+    // 本机分区里仍保留、但共享配置已删除的 Agent：转成待清理项，交给 refreshState 安全回收。
     const currentIds = new Set(config.agents.map((agent) => agent.id));
     const orphanAgents = Object.entries(localAgentRecords)
       .filter(([agentId]) => !currentIds.has(agentId))
@@ -692,6 +759,7 @@ async function readConfig() {
         managedLinks: normalizeManagedLinks(agent.managedLinks),
       }))
       .filter((agent) => agent.directory);
+    // 旧数据只在“未进入只读保护”时提示迁移，属于信息级提示。
     if (legacy && !validation.locked)
       validation.issues.push(
         createIssue(
@@ -714,6 +782,9 @@ async function readConfig() {
   }
 }
 
+// 为什么不能直接整键删除：同一份文档里还存着其他设备的链接记录，直接 removeItem 会把
+// 其他设备的路径与受管链接一并抹掉，导致那些设备再也无法安全回收自己的链接。
+// 因此这里只删除当前设备分区，其他分区保留；仅当没有任何设备分区时才整键删除。
 /** 清除共享配置与当前设备状态；其他设备状态保留到对应设备下次启动后安全回收。 */
 function clearStoredConfig(config) {
   try {
@@ -789,11 +860,13 @@ async function pathsEqual(left, right) {
   try {
     if (comparablePath(left) === comparablePath(right)) return true;
     // 两侧都存在时才解析真实路径，避免对不存在的路径抛异常。
+    // 先并行探测存在性：realpath 对不存在的路径会抛错，探测可避免把“路径不存在”误判为“路径不同”。
     const [leftExists, rightExists] = await Promise.all([
       pathExists(left),
       pathExists(right),
     ]);
     if (leftExists && rightExists) {
+      // 并行解析真实路径，识别通过目录链接/快捷方式指向同一位置的别名路径。
       const [leftRealPath, rightRealPath] = await Promise.all([
         withReadTimeout(fsp.realpath(left), `解析路径 ${left}`),
         withReadTimeout(fsp.realpath(right), `解析路径 ${right}`),
@@ -815,6 +888,7 @@ async function pathsEqual(left, right) {
  * @returns {boolean} child 是否在 parent 内部
  */
 async function isInsideDirectory(parent, child) {
+  // canonical：能解析真实路径就用真实路径（识别链接别名），失败则退回绝对路径，保证判断永不抛错。
   const canonical = async (target) => {
     try {
       return await withReadTimeout(fsp.realpath(target), `解析路径 ${target}`);
@@ -881,6 +955,8 @@ async function assertSafeAgentDirectory(
     throw new Error(
       `该 Skills 目录已由 Agent“${duplicate.name}”使用，请选择其他目录`,
     );
+  // 待清理记录里若还占着同一个目录，必须先让用户处理旧链接，
+  // 否则新旧两批链接会混在同一目录里互相覆盖，后续将无法分辨归属。
   let pendingCleanup;
   for (const agent of config._orphanAgents || []) {
     if (agent.directory && (await pathsEqual(agent.directory, directory))) {
@@ -908,10 +984,12 @@ async function assertSafeAgentDirectory(
 async function readSkillNameDetailed(skillFile) {
   let content;
   try {
+    // 先看文件大小再读内容：既避免超大文件占满内存，也让“读不到文件”与“元数据写错”两种失败原因可区分。
     const stat = await withReadTimeout(
       fsp.stat(skillFile),
       `检查 Skill 文件 ${skillFile}`,
     );
+    // 体积超限同样视为 incomplete：文件没读到，就不能据此判断 Skill 已被删除。
     if (stat.size > MAX_SKILL_FILE_BYTES) {
       return {
         name: "",
@@ -924,6 +1002,7 @@ async function readSkillNameDetailed(skillFile) {
       `读取 Skill 文件 ${skillFile}`,
     );
   } catch (error) {
+    // 读取失败（超时、无权限、被占用）标记 incomplete：上层会保留现有链接并跳过本轮清理。
     return {
       name: "",
       error: `无法读取 ${skillFile}：${errorMessage(error)}`,
@@ -990,17 +1069,22 @@ async function scanSkills(repositoryPath) {
   const skills = [];
   const issues = [];
   let complete = true;
+  // omittedIssueCount 统计被折叠的问题数量，扫描结束时合并成一条提示。
   let omittedIssueCount = 0;
+  // visitedDirectoryCount 与扫描开始时间共同构成“扫描预算”，超限即中止并标记不完整。
   let visitedDirectoryCount = 0;
   const scanStartedAt = Date.now();
   // 显式栈避免递归调用栈溢出，并为深度与目录数量提供清晰边界。
   const pendingDirectories = [{ directory: root, depth: 0 }];
+  // 问题数量封顶：目录权限大面积异常时，避免前端提示区被刷屏。
   const pushIssue = (issue) => {
     if (issues.length < MAX_SCAN_ISSUES) issues.push(issue);
     else omittedIssueCount += 1;
   };
 
+  // 递归改为显式栈的深度优先遍历：既避免爆栈，也便于每轮取目录前检查时间与数量预算。
   while (pendingDirectories.length) {
+    // 每次取目录前检查总时长预算；超时立即停止，且不完整结果不会触发任何清理。
     if (Date.now() - scanStartedAt > MAX_SCAN_DURATION_MS) {
       complete = false;
       pushIssue(
@@ -1013,6 +1097,7 @@ async function scanSkills(repositoryPath) {
     }
     const { directory, depth } = pendingDirectories.pop();
     visitedDirectoryCount += 1;
+    // 目录数量超限：立即停止并标记不完整，防止误选超大目录后长时间占用磁盘与内存。
     if (visitedDirectoryCount > MAX_SCAN_DIRECTORIES) {
       complete = false;
       pushIssue(
@@ -1041,6 +1126,8 @@ async function scanSkills(repositoryPath) {
       continue;
     }
     // 当前目录内存在 SKILL.md → 认定为一个 Skill 目录。
+    // 判定规则：目录内直接存在 SKILL.md 即为一个 Skill（大小写不敏感），不再向下层递归，
+    // 避免把子目录中的 Skill 当作当前目录的 Skill 重复采集。
     const skillEntry = entries.find(
       (entry) => entry.isFile() && entry.name.toLowerCase() === "skill.md",
     );
@@ -1071,6 +1158,7 @@ async function scanSkills(repositoryPath) {
       );
     }
     // 继续遍历子目录：跳过符号链接（防止循环）、node_modules 与 .git*。
+    // 逆序入栈：弹出顺序即目录名的自然顺序，让扫描顺序与提示顺序更符合直觉。
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index];
       const lowerName = entry.name.toLowerCase();
@@ -1097,6 +1185,7 @@ async function scanSkills(repositoryPath) {
       });
     }
   }
+  // 把被折叠的问题合并成一条提示，让用户知道还有多少问题未逐条展示。
   if (omittedIssueCount) {
     issues.push(
       createIssue(
@@ -1156,6 +1245,10 @@ async function scanConfiguredRepository(config) {
   }
 }
 
+// 为什么需要它：切换单个分组开关时只会改动少量 Skill，如果每次都全仓库递归扫描，大仓库会明显卡顿。
+// 因此这里只针对「本次涉及到的 Skill」逐项核验：必须命中最近一次完整扫描缓存，
+// 且源目录仍位于仓库内、仍是有效 Skill；任一项无法确认就把 complete 置为 false，
+// 让 syncAgent 采取“只补不删”的保守策略。缓存缺失时提示用户重新扫描。
 /**
  * 为单个 Agent 的开关变更核验实际涉及的缓存 Skills。
  * 不递归扫描整个仓库；任一源目录不可用时标记为不完整，从而保留已有受管链接并停止危险清理。
@@ -1184,6 +1277,7 @@ async function inspectEnabledCachedSkills(config, agent) {
       );
       continue;
     }
+    // 二次核验：缓存里的路径可能已被移动，必须确认它仍在仓库目录内，防止链接指到仓库之外。
     const insideRepository =
       config.repositoryPath &&
       (await isInsideDirectory(config.repositoryPath, skill.sourcePath));
@@ -1499,6 +1593,7 @@ async function syncAgent(config, agent, scan) {
   const external = [];
   // 本次新建的链接记录，数据库保存失败时用于回滚。
   const createdLinks = [];
+  // 所有返回分支都走 finish()：统一刷新本机外部链接计数并去重问题列表，避免遗漏或重复提示。
   const finish = () => {
     agent.externalLinkedCount = external.length;
     return {
@@ -1521,6 +1616,8 @@ async function syncAgent(config, agent, scan) {
     return finish();
   }
 
+  // 先确认目标目录真的可用（存在且为目录）：不可用时直接返回且不改动任何文件，
+  // 避免在错误位置创建链接，或把已拔掉的移动硬盘当成“Agent 目录被删除”。
   let targetUsable = true;
   try {
     const stat = await withReadTimeout(
@@ -1682,6 +1779,8 @@ async function syncAgent(config, agent, scan) {
     pendingCreations.push({ skill, linkPath });
   }
 
+  // 批量安全检查点：先把本轮所有待创建链接以 pending 状态写入数据库，再真正创建文件，
+  // 即使中途崩溃，下次启动也能根据 pending 记录补齐身份或安全回滚，不产生无法追踪的链接。
   if (pendingCreations.length) {
     pendingCreations.forEach(({ skill, linkPath }) => {
       nextLinks[skill.id] = {
@@ -1704,10 +1803,12 @@ async function syncAgent(config, agent, scan) {
           `创建链接前无法保存批量安全检查点：${error.message}。本轮 ${pendingCreations.length} 个链接均未创建。`,
         ),
       );
+      // 清空待创建列表：接下来的创建循环不会再执行，本轮不会创建任何链接。
       pendingCreations.length = 0;
     }
   }
 
+  // 逐个创建链接：单个失败不影响其他 Skill，失败项会先从受管记录里移除后再统一保存。
   for (const { skill, linkPath } of pendingCreations) {
     try {
       // Windows 使用 junction（目录联接，无需管理员权限），其他平台使用目录符号链接。
@@ -1814,6 +1915,8 @@ function reconcileDeletedSkills(config, scan) {
       ),
     );
   });
+  // 同样的清理也要作用于 enabledSkills：否则已删除的 Skill 会残留在选择状态中，
+  // 界面上就会出现“显示已选中、实际却无链接”的假象。
   config.agents.forEach((agent) => {
     const current = config.enabledSkills[agent.id] || [];
     const missing = current.filter((skillId) => !validSkillIds.has(skillId));
@@ -1919,10 +2022,13 @@ function buildState(
  */
 async function persistSyncResults(config, syncResults) {
   const persistenceIssues = [];
+  // 只读保护下不做任何持久化：不能用规范化后的内存配置覆盖已损坏的原文档。
   if (config._syncLocked) return persistenceIssues;
   try {
     writeConfig(config);
   } catch (error) {
+    // 写入失败 → 回滚本轮新建的链接（只会删除本应用刚创建、且已校验归属的链接），
+    // 避免出现“数据库里没有记录、磁盘上却留有链接”的不可追踪状态。
     const rollbackIssues = [];
     for (const agent of config.agents) {
       const createdLinks = syncResults[agent.id]?.createdLinks || [];
@@ -1976,16 +2082,20 @@ async function persistSyncResults(config, syncResults) {
  * @throws {Error} 恢复检查点无法写入时抛出，且不会执行任何文件操作
  */
 async function refreshState(config) {
+  // 步骤 1：扫描仓库，得到 Skill 列表、问题列表以及“扫描是否完整 / 是否只读保护”。
   const scan = await scanConfiguredRepository(config);
   // 只有完整扫描结果才替换首屏缓存；不完整结果绝不成为后续清理依据。
   if (scan.complete && !scan.locked)
     config._cachedSkills = normalizeCachedSkills(scan.skills);
+  // 步骤 2：清理已失效的 Skill 引用（扫描不完整或只读保护时，函数内部直接返回空结果）。
   const reconciledIssues = reconcileDeletedSkills(config, scan);
   // 只读保护时只观察链接；正常状态先保存恢复检查点，再开始文件系统变更。
   if (!config._syncLocked) writeConfig(config);
+  // 步骤 3：先清理本机遗留的 orphan 链接，再做常规同步，避免两类操作互相干扰。
   const orphanIssues = config._syncLocked
     ? []
     : await cleanupOrphanAgents(config);
+  // 步骤 4：按 Agent 逐个同步链接集合，并在结束后统一持久化 + 失败回滚。
   const syncResults = await syncAllAgents(config, scan);
   const persistenceIssues = await persistSyncResults(config, syncResults);
   return buildState(
@@ -2001,6 +2111,9 @@ async function refreshState(config) {
   );
 }
 
+// 使用场景：应用配置页切换某个分组/Skill 开关时调用（对应 setAgentSkills）。
+// 与 refreshState 的区别：不做全仓库扫描，只核验本次涉及的 Skill，因此响应更快；
+// 代价是依赖「最近一次完整扫描」的缓存，缓存缺失或源目录不可用时会退化为只补不删。
 /**
  * 只同步一次应用配置开关涉及的 Agent。
  * 使用最近一次完整扫描缓存并逐项验证源目录，避免每次点击都递归遍历整个仓库。
@@ -2049,6 +2162,8 @@ async function cleanupAgentLinks(agent) {
   return uniqueIssues(issues);
 }
 
+// orphan Agent 的两种来源：① 其他设备删除了 Agent（本机还留着目录与链接）；
+// ② 本机更换了 Agent 目录或删除了 Agent，但上次清理未完成。两者都只清理“可识别的受管链接”。
 /** 清理当前设备上已经不属于共享配置的 Agent 链接，并保留失败项供下次重试。 */
 async function cleanupOrphanAgents(config) {
   const issues = [];
@@ -2056,6 +2171,7 @@ async function cleanupOrphanAgents(config) {
   for (const agent of config._orphanAgents || []) {
     const agentIssues = await cleanupAgentLinks(agent);
     issues.push(...agentIssues);
+    // 仍有未能清理的链接 → 保留在待清理列表中，下次启动继续尝试，避免链接变成无人认领的孤儿。
     if (Object.keys(agent.managedLinks || {}).length) remaining.push(agent);
   }
   config._orphanAgents = remaining;
@@ -2081,6 +2197,7 @@ function assertConfigWritable(config) {
 
 // 前端通过 window.skillsManager.xxx() 调用以下方法；
 // 所有方法在失败时抛出带中文说明的 Error，由前端统一转换为界面提示。
+// 除 chooseDirectory（调用系统对话框）外，其余方法均为 async：文件系统 I/O 全部异步执行，不阻塞 uTools 渲染线程。
 window.skillsManager = {
   /**
    * 打开系统目录选择框（uTools 的 showOpenDialog，options 与 Electron 一致）。
@@ -2120,6 +2237,8 @@ window.skillsManager = {
     );
   },
 
+  // 前端首屏渲染完成后再调用：重新扫描仓库并同步链接，把最新的真实状态推给界面。
+  // 之所以拆成 getState + reconcile 两步，是为了让窗口先出现内容，避免启动时长时间白屏。
   /** 启动首屏绘制后执行后台一致性校验。 */
   async reconcile() {
     return refreshState(await readConfig());
@@ -2138,11 +2257,14 @@ window.skillsManager = {
     config.theme = theme === "dark" ? "dark" : "light";
     // 只读保护时不能用规范化后的配置覆盖损坏原文档，但主题仍可独立更新。
     if (config._syncLocked) {
+      // 只读保护时只能做“单字段补丁”式写入：若原文档缺失（旧版结构）就无处可补，
+      // 因此只能报错，引导用户先在设置页清除数据。
       if (config._legacy || !isPlainObject(config._storedState))
         throw new Error(
           "本地数据库处于只读保护，暂时无法保存主题。请先在设置页清除数据。",
         );
       try {
+        // 展开原文档再改 theme：保留损坏但可读的其他字段，避免用规范化结果覆盖用户数据。
         database().setItem(STATE_KEY, {
           ...config._storedState,
           theme: config.theme,
@@ -2168,6 +2290,7 @@ window.skillsManager = {
       repositoryPath,
       "Skills 仓库目录",
     );
+    // 拒绝磁盘根目录：根目录不仅扫描极慢，还会把整盘内容都当成候选 Skills，风险与开销都不可接受。
     if (path.parse(normalizedPath).root === normalizedPath)
       throw new Error(
         "Skills 仓库不能是磁盘根目录，请选择专用的 Skills 文件夹",
@@ -2270,6 +2393,8 @@ window.skillsManager = {
     const existing = config.agents.find((agent) => agent.id === id);
     if (existing) {
       // 目录变更：旧目录记录转为设备级待清理项，refreshState 保存检查点后再安全清理。
+      // 目录变更不直接删旧链接：先把旧目录记录转为本机待清理项，待 refreshState 写入检查点后再安全清理，
+      // 这样即使中途崩溃或断电，旧链接也不会变成无人管理的孤儿。
       if (
         existing.directory &&
         !(await pathsEqual(existing.directory, directory))
@@ -2280,6 +2405,7 @@ window.skillsManager = {
           directory: existing.directory,
           managedLinks: normalizeManagedLinks(existing.managedLinks),
         });
+        // 旧链接归属已转移到 orphan 记录，当前 Agent 从空记录开始，避免同一链接被两处引用。
         existing.managedLinks = {};
       }
       existing.name = name;
@@ -2315,6 +2441,7 @@ window.skillsManager = {
     // 同步删除该 Agent 的分组派生状态与 Skill 选择记录。
     delete config.enabledGroups[agentId];
     delete config.enabledSkills[agentId];
+    // refreshState 会保存删除结果、清理受管链接并返回最新状态；未能清理的链接会留在 orphan 记录中。
     const state = refreshState(config);
     return state;
   },
@@ -2339,6 +2466,7 @@ window.skillsManager = {
     });
     // 先用单文档写入“共享配置已清空 + 本机待清理记录”的检查点。
     writeConfig(cleared);
+    // 再按待清理记录逐条安全删除本机链接；只有可识别的链接都处理完，才会真正清空数据库文档。
     const issues = await cleanupOrphanAgents(cleared);
     if (config._syncLocked) {
       issues.push(
@@ -2348,6 +2476,7 @@ window.skillsManager = {
         ),
       );
     }
+    // 仍有未清理项 → 保留本机待清理记录供下次重试；否则只删除当前设备分区（其他设备分区保留）。
     if (cleared._orphanAgents.length) writeConfig(cleared);
     else clearStoredConfig(cleared);
     return buildState(
@@ -2378,10 +2507,12 @@ window.skillsManager = {
     config.enabledSkills[agentId] = [
       ...new Set(Array.isArray(skillIds) ? skillIds.map(String) : []),
     ].filter((skillId) => validIds.has(skillId));
+    // 同步重算分组开关状态：分组是否开启完全由 enabledSkills 推导，保证界面上的双向联动一致。
     config.enabledGroups[agentId] = deriveEnabledGroupIds(
       config.groups,
       config.enabledSkills[agentId],
     );
+    // 只做本次开关变更的定向同步：不扫全仓库，先写检查点再改链接。
     return syncAgentSkillsState(config, agent);
   },
 };

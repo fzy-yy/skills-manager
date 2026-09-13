@@ -10,16 +10,26 @@
   - 结果通过 resolve 事件交给 appStore.resolveDialog 收尾。
 -->
 <script setup>
+// ============ 一、依赖导入 ============
 // 警示图标（对话框头部）与关闭图标。
 import { AlertTriangle, X } from "@lucide/vue";
 // 挂载/卸载时注册与注销全局键盘监听。
 import { onBeforeUnmount, onMounted } from "vue";
 
+// ============ 二、组件接口 ============
+// 单向数据流：dialog 由 appStore 持有，本组件只读；如果在子组件里改它会绕开 resolveDialog，导致 Promise 永远不结束。
 // 对话框内容对象：{ open, title, message, confirmText, cancelText, tone }。
 const props = defineProps({ dialog: { type: Object, required: true } });
 // 用户选择结果事件：参数为布尔值，true 表示确认。
 const emit = defineEmits(["resolve"]);
 
+// ============ 三、键盘交互与生命周期 ============
+/**
+ * 全局键盘监听：对话框打开时按 Esc 视为取消。
+ *
+ * @param {KeyboardEvent} event - window 上的 keydown 事件对象
+ * @returns {void}
+ */
 // 支持 Escape 取消，避免对话框只能依赖鼠标操作。
 function handleKeydown(event) {
   if (props.dialog.open && event.key === "Escape") emit("resolve", false);
@@ -27,11 +37,14 @@ function handleKeydown(event) {
 // 使用 window 级别的 keydown 监听，保证焦点不在对话框内部时 Esc 依然生效。
 onMounted(() => window.addEventListener("keydown", handleKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
+// 注意：Esc 只在 dialog.open 为真时处理，否则会拦截页面上其他依赖 Esc 的交互行为。
 </script>
 
 <template>
+  <!-- 层级约定：遮罩 z-50 低于顶部进度条（z-60），确认期间仍能看到耗时操作的进度 -->
   <!-- Teleport 到 body：避免被父级容器的 overflow/transform 裁剪 -->
   <Teleport to="body">
+    <!-- 遮罩使用 bg-overlay 主题令牌，浅色与深色模式共用同一语义变量，无需在此写死透明度 -->
     <!-- 遮罩层：click.self 保证只有点击遮罩本身（而非对话框内容）时才视为取消 -->
     <div
       v-if="dialog.open"
@@ -39,6 +52,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
       role="presentation"
       @click.self="emit('resolve', false)"
     >
+      <!-- 约束：本组件不做完整焦点陷阱（focus trap），仅依靠 autofocus 把初始焦点交给确认按钮 -->
       <!-- 对话框主体：alertdialog 语义 + aria-modal，便于读屏软件正确播报 -->
       <section
         class="w-full max-w-md rounded-xl border border-border bg-surface-raised p-5 shadow-2xl"
@@ -79,6 +93,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
             <X :size="18" />
           </button>
         </header>
+        <!-- 语义：取消在前、确认在后，与系统对话框的阅读顺序保持一致 -->
         <!-- 底部按钮：取消返回 false，确认返回 true；确认按钮默认聚焦以支持回车操作 -->
         <footer class="mt-6 flex justify-end gap-2">
           <button

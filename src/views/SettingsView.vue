@@ -16,14 +16,23 @@ import PageHeader from "../components/PageHeader.vue";
 // 全局状态仓库（主题状态与所有动作方法）。
 import { useAppStore } from "../stores/appStore";
 
+// 全局状态仓库：主题读写、清除本地数据、全局提示与确认对话框均由它提供。
 const store = useAppStore();
 // 主题选项：value 与 store.theme 对应，icon 由模板动态渲染。
+// 选项内容是静态常量，用普通数组即可，不需要 ref/computed。
 const themeOptions = [
   { value: "light", label: "浅色", icon: Sun },
   { value: "dark", label: "深色", icon: Moon },
 ];
 
 // 主题选择立即生效，并由 preload 服务写入 uTools 本地数据库。
+/**
+ * 切换外观主题：先乐观更新界面，再持久化到 uTools 本地数据库。
+ * 持久化失败时 store.setTheme 会回滚主题，因此这里仅在成功时提示。
+ *
+ * @param {'light'|'dark'} theme - 目标主题
+ * @returns {Promise<void>} 保存成功或回滚后结束
+ */
 async function selectTheme(theme) {
   // 点击当前已选主题时不做任何处理，避免多余的数据库写入。
   if (store.theme === theme) return;
@@ -35,6 +44,9 @@ async function selectTheme(theme) {
 /**
  * 清除本地数据：先二次确认，再调用服务端清理。
  * 服务端只删除仍可识别的「受管链接」，源文件与他人创建的内容一律保留。
+ *
+ * @returns {Promise<void>} 用户取消或清理完成后结束
+ * @throws {never} 清理失败由 store.execute 统一提示，页面无需额外处理
  */
 async function clearData() {
   const accepted = await store.confirm({
@@ -46,6 +58,7 @@ async function clearData() {
   });
   if (!accepted) return;
   try {
+    // 成功后服务端返回清空后的状态，仓库路径、分组、Agent 与主题都会随之复位。
     await store.clearData();
   } catch (_) {}
 }
@@ -56,6 +69,7 @@ async function clearData() {
   <section
     class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
   >
+    <!-- 页头：本页只做偏好与数据管理，不涉及仓库文件操作 -->
     <PageHeader
       eyebrow="个性设置"
       title="设置"

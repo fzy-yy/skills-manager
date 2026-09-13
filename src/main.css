@@ -1,14 +1,43 @@
+/* ============================================================================
+ * 全局样式与主题令牌总入口（Tailwind CSS 4 语法）。
+ *
+ * 文件结构分三层，顺序不可打乱：
+ *   1. @import "tailwindcss"  —— 引入 preflight 基础重置与全部工具类；
+ *   2. @custom-variant dark    —— 声明深色模式变体的匹配规则；
+ *   3. :root / .dark / @theme   —— 先定义令牌，再把令牌映射为语义工具类。
+ *
+ * Tailwind v4 与 v3 的差异（这里是迁移时最容易撞上的三点）：
+ *   1. 不再有 tailwind.config.js 与 postcss.config.js，主题与变体全部写在 CSS 里；
+ *   2. 不再使用 @tailwind base / components / utilities 三条指令，改为单条 @import；
+ *      若改回 v3 写法，本文件不会报错，但页面会彻底丢失样式（比报错更难排查）；
+ *   3. 自定义色必须通过 @theme 注册后才会生成对应工具类，直接写 CSS 变量不会生成类名。
+ *
+ * 命名约定：--ui-xxx 是“令牌变量”，只供 @theme 引用；--color-xxx / --font-xxx
+ * 属于 Tailwind 命名空间变量，用于生成工具类。两者刻意分开，避免工具类名与变量名混淆。
+ *
+ * 使用约束：业务组件里只允许使用语义类（如 bg-canvas、text-ink、border-border），
+ * 禁止硬编码色值；否则切换主题时会出现部分区域颜色不跟随的问题。
+ * ========================================================================== */
+
+/* ===== 一、Tailwind 引入与深色模式变体 ===== */
 /* 全局样式入口：由 Tailwind 4 统一提供基础样式、工具类与主题变量 */
 @import "tailwindcss";
 
 /* 深色模式变体：以 <html class="dark"> 作为开关（由 appStore 维护），
    dark:xxx 工具类在 .dark 自身及其后代元素上生效 */
+/* 注意：这里只声明“如何匹配深色”，真正的开关动作在 appStore.setTheme 中
+   通过 document.documentElement.classList.toggle("dark", ...) 完成；
+   若删掉本行，所有 dark: 前缀的类都不会生成，手动切换主题时界面将毫无变化。
+   使用 :where() 包裹是为了保持特异性为 0，避免与组件自身的类名权重产生冲突。 */
 @custom-variant dark (&:where(.dark, .dark *));
 
+/* ===== 二、浅色主题设计令牌（默认主题） ===== */
 /* 颜色只在令牌层定义，组件内全部通过 Tailwind 语义类使用。 */
 /* 浅色主题（默认主题）：:root 中的变量即设计令牌，深色主题在 .dark 中覆盖同名变量 */
 :root {
   /* 主色系：品牌色、悬停色、浅色底、描边色以及主色之上的文字色 */
+  /* --ui-primary-hover 专门用于 hover / 按下态，不要在静态样式里使用，
+     否则用户无法从颜色上看出元素是否可交互 */
   --ui-primary: #2563eb;
   --ui-primary-hover: #1d4ed8;
   --ui-primary-soft: #eff6ff;
@@ -17,29 +46,47 @@
   /* 开关控件滑块颜色 */
   --ui-control-thumb: #ffffff;
   /* 背景层级：canvas 页面底色 / surface 卡片底色 / surface-raised 浮层底色 */
+  /* 三层递进的用途：canvas 铺满页面、surface 承载内容卡片、surface-raised 用于下拉菜单
+     与对话框等“浮在最上面”的块；三者需逐级变化，若取值相同则界面会失去层次感 */
   --ui-canvas: #f6f8fc;
   --ui-surface: #ffffff;
   --ui-surface-raised: #ffffff;
   /* 描边层级：border 常规分隔线 / border-strong 输入框等需要更明显的描边 */
+  /* 分两级的理由：默认描边只做区域分隔（应尽量弱），强描边需要被视线优先捕捉（如输入框、
+     激活项、拖拽区域）；只用一种描边会让界面要么到处很重、要么边界完全看不清 */
   --ui-border: #dde3ec;
   --ui-border-strong: #cbd4e1;
   /* 文字层级：ink 正文 / ink-secondary 次级说明 / ink-muted 弱提示文字 */
+  /* 必须使用这三个令牌而不是给文字加 opacity：透明度会连同背景一起被看透，
+     在深色主题下极易造成对比度不足（文字看不清），而令牌可以单独调优 */
   --ui-ink: #172033;
   --ui-ink-secondary: #596579;
   --ui-ink-muted: #8b96a8;
   /* 危险状态：删除、清除数据等破坏性操作使用 */
+  /* 危险色属于功能色而非品牌色，即使它看起来接近主色也不能用主色代替，
+     否则用户无法凭颜色区分“普通操作”与“不可逆操作”；soft 变体用于按钮底色与提示背景 */
   --ui-danger: #dc2626;
   --ui-danger-soft: #fef2f2;
   /* 警告状态：非致命的数据异常提示使用 */
+  /* 与危险色分工明确：警告表示“需要注意但可以继续”（如某个 Skill 目录不存在），
+     危险表示“即将破坏数据”（如删除分组、清空本地数据） */
   --ui-warning: #a16207;
   --ui-warning-soft: #fefce8;
   /* 模态遮罩：半透明深色，用于确认对话框背景 */
+  /* 使用 rgb(... / 百分比) 的透明度写法而非直接调 opacity 工具类，
+     以保证对话框内的文字与按钮始终不透明、可读 */
   --ui-overlay: rgb(15 23 42 / 45%);
 }
 
+/* ===== 三、深色主题令牌覆盖 ===== */
+/* 覆盖策略：.dark 只重写同名令牌的值，不新增选择器、不修改任何组件类名；
+   主题切换本质上是 CSS 变量替换，不需要重新编译样式，也不会触发 Vue 组件重渲染。
+   appStore.setTheme 在切换失败时会回滚主题值，因此这里的变量必须保持“成对存在”，
+   即 :root 中出现的每个 --ui-xxx 都要在 .dark 中有对应覆盖，漏写会导致该处颜色在深色下仍然刺眼。 */
 /* 深色主题：仅覆盖令牌值，组件类名无需改动即可整体换肤 */
 .dark {
   /* 告知浏览器当前是深色配色，滚动条、表单控件等原生外观会随之切换 */
+  /* 这一行遗漏时，输入框、下拉框、滚动条仍会按浅色绘制，与页面形成明显色差 */
   color-scheme: dark;
   /* 主色系：深色底上使用更亮的蓝，保证对比度 */
   --ui-primary: #60a5fa;
@@ -70,6 +117,14 @@
   --ui-overlay: rgb(2 6 23 / 70%);
 }
 
+/* ===== 四、令牌到 Tailwind 工具类的映射 ===== */
+/* @theme inline 的两条硬性规则：
+   1. 左侧必须是 Tailwind 的命名空间前缀（--color-* 生成颜色类，--font-* 生成字体类）；
+      若写成 --ui-canvas，Tailwind 不会识别，也就不会生成 bg-canvas，页面会报未定义类；
+   2. 右侧直接引用令牌变量而不是写死色值，配合 inline 语义可让工具类在运行时读取变量，
+      这正是“只改 .dark 变量即可全局换肤”的实现原理；若换成写死色值，
+      则必须重新构建才能换肤，主题切换功能会直接失效。
+   注意：本块是 v4 独有的写法，旧文档中的 theme.extend.colors 已不存在。 */
 /* 把设计令牌映射为 Tailwind 语义色，实现 bg-canvas、text-ink、border-border 等工具类；
    inline 表示直接引用变量本身，使主题切换无需重新编译样式 */
 @theme inline {
@@ -93,5 +148,12 @@
   --color-warning-soft: var(--ui-warning-soft);
   --color-overlay: var(--ui-overlay);
   /* 全局字体栈：优先使用 Inter，其次回退到系统界面字体与中文黑体 */
+  /* 中文字体必须显式列入：若只依赖 Inter，中文会回退到浏览器默认字体，
+     导致同一界面上中英文字重、字宽不一致；uTools 运行环境为 Windows，
+     因此把 Microsoft YaHei 放在 PingFang SC 之后作为最终回退 */
   --font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
+
+/* 文件末尾约定：本文件必须保持为标准 CSS 写法，禁止引入 SCSS / Less 等预处理器语法，
+   因为 @tailwindcss/vite 会直接解析 @theme 与 @custom-variant，
+   多一层预处理器会破坏解析过程（构建不报错但主题变量全部失效）。 */

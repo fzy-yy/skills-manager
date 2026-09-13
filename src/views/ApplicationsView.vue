@@ -9,6 +9,15 @@
   store 负责乐观更新、请求合并和失败回滚，
   以保证连续操作流畅，同时让界面最终状态与磁盘上的真实链接一致。
 -->
+
+<!--
+  联动规则与注意事项：
+  - 分组没有独立的持久化状态：左侧分组开关是「group.skillIds 是否已被全部启用」的投影，
+    因此重叠分组（两个分组包含同一个 Skill）会自动反映最终覆盖情况，无需人工同步；
+  - 本页不做任何文件操作，只负责“选择”；Agent 目录下受管链接的增删由 preload 服务按差集完成；
+  - 所有开关在 store.busy（有耗时操作进行中）时禁用，目的是避免上一轮同步没结束时又排入新请求，
+    否则最终落库的状态会和用户看到的不一致。
+-->
 <script setup>
 // 图标：Bot 表示 Agent，Layers3 表示分组，Puzzle 表示单个 Skill。
 import { Bot, Layers3, Puzzle } from "@lucide/vue";
@@ -26,13 +35,16 @@ import ToggleSwitch from "../components/ToggleSwitch.vue";
 import { useAppStore } from "../stores/appStore";
 
 const store = useAppStore();
+// 页面状态全部由 store 派生，本页只保留「当前选中的 Agent」这一个交互态。
 // 当前选中的 Agent id。
 const selectedAgentId = ref("");
 // 把 Agent 列表转换为 BaseSelect 需要的 { label, value } 结构。
+// 不做缓存：Agent 数量很少，重命名后也能立即反映到下拉框。
 const agentOptions = computed(() =>
   store.agents.map((agent) => ({ label: agent.name, value: agent.id })),
 );
 // 派生：当前选中的 Agent 对象（用于展示其 Skills 目录路径）。
+// 选中项被其他窗口删除时，这里会变成 undefined，模板据此隐藏目录行。
 const selectedAgent = computed(() =>
   store.agents.find((agent) => agent.id === selectedAgentId.value),
 );
@@ -40,8 +52,10 @@ const selectedAgent = computed(() =>
 const activeSkillIds = computed(
   () => store.enabledSkills[selectedAgentId.value] || [],
 );
+// 用 Set 支撑逐个 Skill 的开启判断：列表较长时避免每行都做一次数组线性查找。
 const activeSkillSet = computed(() => new Set(activeSkillIds.value));
 // 组内至少有一个 Skill，且所有 Skills 均已开启时，该分组自动显示为开启。
+// 空分组恒判定为未开启，这样界面上的开关会被同时置灰，避免出现没有意义的操作。
 const activeGroups = computed(() =>
   store.groups.filter(
     (group) =>
@@ -49,12 +63,15 @@ const activeGroups = computed(() =>
       group.skillIds.every((skillId) => activeSkillSet.value.has(skillId)),
   ),
 );
+// 模板里的分组开关是受控组件，用 Set 让判断保持 O(1)，避免每次渲染都遍历数组。
 const activeGroupIdSet = computed(
   () => new Set(activeGroups.value.map((group) => group.id)),
 );
 
 // Agent 列表发生变化时保证选择值始终有效。
 // immediate 让首次进入页面时自动选中第一个 Agent；deep 保证重命名等改动也能触发校验。
+// 注意：这里只「纠正」失效的选择，绝不写回 store；否则列表刷新会触发多余的数据库写入，
+// 还可能打断正在进行的链接同步。
 watch(
   () => store.agents,
   (agents) => {
@@ -71,16 +88,23 @@ watch(
  * @param {boolean} enabled - 开关的目标状态（true 为开启）
  */
 async function setGroup(group, enabled) {
+  // 以当前启用集合的副本为基准做批量增删：一次提交只包含最终集合，
+  // 从而避免逐个 Skill 提交时读到尚未回写的过期响应式值。
   const next = new Set(activeSkillIds.value);
   group.skillIds.forEach((skillId) =>
     enabled ? next.add(skillId) : next.delete(skillId),
   );
+  // 提交给 store 的防抖合并逻辑：连续点击多个分组只会触发一次链接同步。
   try {
     await store.setAgentSkills(selectedAgentId.value, [...next]);
   } catch (_) {}
+  // 失败时 store 已给出全局提示并回滚乐观状态，这里静默即可，
+  // 否则会在控制台留下未处理的 Promise 拒绝，也会造成重复提示。
 }
 
 /** 单独开启或关闭一个 Skill；覆盖完整分组时，左侧分组会自动联动。 */
+// 左侧分组没有自己的状态，它由最终启用集合推导，所以这里只要提交正确的集合，
+// 分组开关与顶部统计就会自动保持一致，不需要额外的同步代码。
 async function setSkill(skillId, enabled) {
   const next = new Set(activeSkillIds.value);
   if (enabled) next.add(skillId);
@@ -88,6 +112,7 @@ async function setSkill(skillId, enabled) {
   try {
     await store.setAgentSkills(selectedAgentId.value, [...next]);
   } catch (_) {}
+  // 失败处理与 setGroup 相同：store 已提示并回滚，这里静默。
 }
 </script>
 
@@ -96,6 +121,7 @@ async function setSkill(skillId, enabled) {
   <section
     class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
   >
+    <!-- 页头：说明本页的配置目标 -->
     <PageHeader
       eyebrow="按需启用"
       title="应用配置"
@@ -103,11 +129,14 @@ async function setSkill(skillId, enabled) {
     />
 
     <!-- 有 Agent 时才展示配置界面 -->
+    <!-- 没有任何 Agent 时，下面的 EmptyState 会引导用户先去 Agents 页面添加 -->
     <template v-if="store.agents.length">
       <!-- 目标选择卡片：Agent 下拉框 + 右侧开启数量统计 + 下方目录路径 -->
+      <!-- 统计与目录都属于「当前 Agent 的只读信息」，切换 Agent 时会自动重新派生 -->
       <div
         class="grid grid-cols-[minmax(0,420px)_1fr] items-end gap-x-6 gap-y-2 rounded-xl border border-border bg-surface p-5 shadow-sm"
       >
+        <!-- 左侧：目标 Agent 下拉选择（图标 + 下拉框） -->
         <div>
           <label class="mb-1.5 block text-xs font-semibold text-ink-secondary"
             >目标 Agent</label
@@ -121,6 +150,7 @@ async function setSkill(skillId, enabled) {
           </div>
         </div>
         <!-- 统计信息：已开启分组数与实际链接的 Skills 数 -->
+        <!-- 两个数字都来自 store.enabledSkills 的派生结果，和右侧逐个开关始终一致 -->
         <div class="flex justify-end gap-6 text-xs text-ink-secondary">
           <span
             ><strong class="mr-1 text-lg text-primary">{{
@@ -136,6 +166,7 @@ async function setSkill(skillId, enabled) {
           >
         </div>
         <!-- 当前 Agent 的 Skills 目录，便于确认配置是否指向预期位置 -->
+        <!-- 用 v-if 兼容「Agent 被其他窗口删除」的瞬时状态，避免渲染 undefined -->
         <p
           v-if="selectedAgent"
           class="col-span-2 m-0 truncate pl-6.5 font-mono text-xs text-ink-muted"
@@ -145,6 +176,7 @@ async function setSkill(skillId, enabled) {
       </div>
 
       <!-- 双栏配置区：左侧分组批量开关，右侧全部 Skills 单项开关。 -->
+      <!-- 窄窗口（<760px）自动折成单列，避免两列都被挤压到无法阅读 -->
       <div
         class="mt-4 grid grid-cols-2 items-start gap-4 max-[760px]:grid-cols-1"
       >
@@ -154,6 +186,7 @@ async function setSkill(skillId, enabled) {
           <header
             class="flex min-h-14 items-center gap-2 border-b border-border px-4"
           >
+            <!-- 左栏：分组批量开关，开启即把组内 Skills 全部加入启用集合 -->
             <Layers3 class="text-primary" :size="18" :stroke-width="1.8" />
             <h2 class="m-0 flex-1 text-sm font-bold text-ink">Skills 分组</h2>
             <span class="text-xs text-ink-muted"
@@ -162,6 +195,7 @@ async function setSkill(skillId, enabled) {
           </header>
 
           <template v-if="store.groups.length">
+            <!-- 逐个渲染分组；组内没有 Skills 时开关会被置灰（无内容可应用） -->
             <div
               v-for="group in store.groups"
               :key="group.id"
@@ -179,6 +213,7 @@ async function setSkill(skillId, enabled) {
                 >
               </div>
               <!-- 开启时批量加入组内 Skills；关闭时批量移除。 -->
+              <!-- busy 期间禁用：避免上一轮链接同步未结束时又排入新请求；空分组也禁用 -->
               <ToggleSwitch
                 :model-value="activeGroupIdSet.has(group.id)"
                 :disabled="store.busy || !group.skillIds.length"
@@ -201,6 +236,7 @@ async function setSkill(skillId, enabled) {
           <header
             class="flex min-h-14 items-center gap-2 border-b border-border px-4"
           >
+            <!-- 右栏：全部 Skills 的单项开关，与左栏共享同一份启用集合 -->
             <Puzzle class="text-primary" :size="18" :stroke-width="1.8" />
             <h2 class="m-0 flex-1 text-sm font-bold text-ink">全部 Skills</h2>
             <span class="text-xs text-ink-muted"
@@ -209,6 +245,7 @@ async function setSkill(skillId, enabled) {
           </header>
 
           <template v-if="store.skills.length">
+            <!-- 逐项开关：开启后 preload 会在该 Agent 目录创建指向仓库源目录的受管链接 -->
             <div
               v-for="skill in store.skills"
               :key="skill.id"
@@ -222,6 +259,7 @@ async function setSkill(skillId, enabled) {
               <strong class="min-w-0 flex-1 truncate text-sm">{{
                 skill.name
               }}</strong>
+              <!-- 受控开关：状态完全来自 store，开启/关闭由 setSkill 提交最终集合 -->
               <ToggleSwitch
                 :model-value="activeSkillSet.has(skill.id)"
                 :disabled="store.busy"

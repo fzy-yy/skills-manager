@@ -24,6 +24,7 @@ import PathPicker from "../components/PathPicker.vue";
 // 全局状态仓库。
 import { useAppStore } from "../stores/appStore";
 
+// 全局状态仓库：Agent 增删改、系统目录选择、全局提示与忙碌标记均由它提供。
 const store = useAppStore();
 // 正在编辑的 Agent id；空字符串表示新增模式。
 const editingId = ref("");
@@ -56,6 +57,9 @@ function edit(agent) {
 /**
  * 打开系统目录选择框并把结果写入表单。
  * 目录选择能力由 preload 服务的 chooseDirectory 提供。
+ *
+ * @returns {Promise<void>} 用户取消选择时保留表单中的原路径
+ * @throws {never} 选择失败已转为全局错误提示，不再向外抛出
  */
 async function browse() {
   try {
@@ -69,11 +73,15 @@ async function browse() {
 /**
  * 保存 Agent（新增或更新），成功后回到新增模式并清空表单。
  * 服务端会校验目录合法性（不能是磁盘根目录、不能与仓库目录互相包含、不能与其他 Agent 重复）。
+ *
+ * @returns {Promise<void>} 必填项缺失、服务端校验失败或保存完成后结束
+ * @throws {never} 服务端异常由 store.execute 统一提示，模板调用处无需捕获
  */
 async function save() {
   if (!name.value.trim() || !directory.value.trim())
     return store.notify("请完整填写 Agent 名称和 Skills 目录", "error");
   try {
+    // id 为空即新增、有值即更新：服务端以 id 是否存在区分两种写入路径。
     await store.upsertAgent({
       id: editingId.value || undefined,
       name: name.value,
@@ -88,6 +96,8 @@ async function save() {
  * 若删除的正是当前编辑项，则同步重置表单。
  *
  * @param {{id: string, name: string}} agent - 被删除的 Agent
+ * @returns {Promise<void>} 用户取消或删除完成后结束
+ * @throws {never} 删除失败由 store.execute 统一提示
  */
 async function remove(agent) {
   const accepted = await store.confirm({
@@ -98,6 +108,7 @@ async function remove(agent) {
   });
   if (!accepted) return;
   try {
+    // 服务端会删除该 Agent 记录，并只清理由本应用创建的受管链接。
     await store.deleteAgent(agent.id);
     if (editingId.value === agent.id) reset();
   } catch (_) {}
@@ -109,6 +120,7 @@ async function remove(agent) {
   <section
     class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
   >
+    <!-- 页头：说明 Agents 页管理的是“Agent 名称 + 其 Skills 目录”这组信息 -->
     <PageHeader
       eyebrow="目标管理"
       title="Agents"

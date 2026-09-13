@@ -1,5 +1,16 @@
 <!doctype html>
+<!-- uTools 插件应用 HTML 入口：构建后位于 dist/index.html，由 uTools 以 file:// 方式直接打开。
+
+     本文件只承担“外壳”职责，即文档元信息、样式类名容器与前端脚本引入，不包含任何业务逻辑。
+
+     约定与注意事项：
+       1. 页面上的 bg-canvas、text-ink、font-sans 等语义类名全部来自 src/main.css 的设计令牌；
+          此处禁止写入硬编码色值，否则切换深色主题时会出现局部颜色不跟随的问题。
+       2. 脚本必须是 module 形式并保留在 body 末尾：uTools 只识别 html 与 js 产物，
+          若改成内联脚本或去掉 type="module"，Vite 将无法完成打包，插件也会加载失败。
+       3. 本文件不参与 Vue 组件渲染，修改后必须重新执行 vite build，dist 才会同步更新。 -->
 <html lang="zh-CN">
+  <!-- ============ 一、文档元信息与窗口基础设置 ============ -->
   <head>
     <!-- 字符编码固定为 UTF-8，保证中文指令、中文提示文案与 SKILL.md 元数据不乱码 -->
     <meta charset="UTF-8" />
@@ -8,14 +19,20 @@
     <!-- 页面标题：仅在 uTools 开发者工具预览标签页可见，插件窗口标题由 uTools 控制 -->
     <title>Skills Manager</title>
   </head>
+  <!-- ============ 二、应用挂载容器与入口脚本 ============ -->
   <!-- body 直接承担全局排版：m-0 清除默认外边距、overflow-hidden 禁止整页滚动、text-sm/antialiased 统一字号与抗锯齿；
        bg-canvas、font-sans、text-ink 等语义类均来自 src/main.css 中定义的设计令牌 -->
   <body
     class="m-0 overflow-hidden bg-canvas font-sans text-sm text-ink antialiased"
   >
+    <!-- 区块说明：挂载容器是 Vue 应用的唯一根节点，其宽高决定所有页面可用空间 -->
+    <!-- 尺寸说明：当前代码使用 min-w-155（Tailwind v4 的数值刻度写法：155 乘以 0.25rem 等于 38.75rem，即 620px），
+         与旧写法（min-w-[620px]）完全等价，仅书写方式不同，窗口最小宽度约束并未发生变化 -->
     <!-- Vue 应用挂载点：src/main.js 会把根组件 App.vue 渲染到该容器；
          h-screen 让容器撑满插件窗口高度、min-w-[620px] 保证窗口变窄时布局不塌陷 -->
     <div id="app" class="h-screen min-w-155"></div>
+    <!-- 约定：src 路径保留前导斜杠写法即可，Vite 会据此解析源码并在构建时重写为 dist 下的资源引用；
+         不要手工改成相对路径，file:// 场景下容易解析到错误目录导致白屏 -->
     <!-- 前端入口脚本：由 Vite 打包为普通 JS 后 uTools 才能识别（uTools 仅识别 html/css/js） -->
     <script type="module" src="/src/main.js"></script>
   </body>

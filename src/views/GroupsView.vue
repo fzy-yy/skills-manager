@@ -25,6 +25,7 @@ import PageHeader from "../components/PageHeader.vue";
 // 全局状态仓库。
 import { useAppStore } from "../stores/appStore";
 
+// 全局状态仓库：分组读写、忙碌标记、全局提示与确认对话框均由此提供。
 const store = useAppStore();
 // 当前选中的分组 id；新建时是临时 id（group-new-*）。
 const selectedId = ref("");
@@ -54,6 +55,8 @@ watch(
 );
 
 // 切换选中分组时，把该分组的数据复制到草稿，避免直接编辑 store 中的状态。
+// 注意：skillIds 是原样复制，即使其中含有仓库中已不存在的 Skill id 也会保留，
+// 这样不会因为仓库临时缺少文件而静默丢弃用户既有的分组配置。
 watch(
   selectedGroup,
   (group) => {
@@ -97,6 +100,9 @@ function toggleSkill(skillId) {
 /**
  * 保存分组：新建时追加到列表，编辑时替换对应项，然后整体提交给 store。
  * 保存成功后若原来处于新建状态，需要把选中项切换到刚创建的分组。
+ *
+ * @returns {Promise<void>} 校验不通过或保存完成后结束
+ * @throws {never} 不向外抛出异常，失败提示统一由 store.execute 给出
  */
 async function save() {
   const name = draftName.value.trim();
@@ -117,6 +123,7 @@ async function save() {
         },
       ];
   try {
+    // 保存分组后服务端会按新分组重建受影响的 Agent 受管链接，前端无需再手动同步。
     await store.saveGroups(next);
     // 新建完成后把选中项指向该分组，界面从“空草稿”切换为真实分组。
     if (!selectedGroup.value) selectedId.value = next[next.length - 1].id;
@@ -126,6 +133,9 @@ async function save() {
 /**
  * 删除分组：先弹确认框，确认后提交新列表并回退到剩余分组中的第一个。
  * 组内 Skills 的仓库源文件不会被删除，只会同步移除 Agent 目录下不再需要的链接。
+ *
+ * @returns {Promise<void>} 用户取消或删除完成后结束
+ * @throws {never} 不向外抛出异常，失败提示统一由 store.execute 给出
  */
 async function remove() {
   if (!selectedGroup.value) return;

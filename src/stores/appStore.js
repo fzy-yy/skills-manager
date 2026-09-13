@@ -8,6 +8,14 @@
  *
  * 约定：凡是会改动配置或文件系统的动作，都返回 Promise，
  * 页面可通过 await 或 try/catch 感知执行结果（失败信息已由本仓库统一提示）。
+ *
+ * 并发与一致性设计（改动本文件前请先读完以下三点）：
+ *  1. 文件与数据库操作全局串行（operationInFlight）：链接同步会读写同一批目录，
+ *     并发的两轮同步各自基于旧快照计算增删，最终会留下无法追踪的残留链接；
+ *  2. 应用配置开关属于高频操作，采用「乐观更新 + 300ms 防抖合并 + 失败回滚」，
+ *     只把每个 Agent 的最终选择提交一次，避免快速连点产生大量磁盘写入与界面卡顿；
+ *  3. 服务端的只读保护（数据库配置异常时禁止一切写操作）由 preload 抛错体现，
+ *     本仓库不自行拦截，只把错误提示给用户并在必要时回滚界面状态。
  */
 
 // Vue 响应式 API：ref 定义状态，computed 定义派生状态。
@@ -15,9 +23,13 @@ import { computed, ref } from "vue";
 // Pinia 的组合式仓库定义函数。
 import { defineStore } from "pinia";
 
+// 仓库采用 Pinia 组合式（setup）写法：状态用 ref、派生用 computed，
+// 与页面里的 <script setup> 保持一致，方便把逻辑抽成可复用的普通函数。
 // Pinia 统一管理业务数据、主题、全局提示与确认对话框。
 export const useAppStore = defineStore("app", () => {
   // ---------- 业务状态 ----------
+  // 这些 ref 是页面唯一的数据来源：页面只读消费，写入必须通过下方导出的动作方法，
+  // 从而保证「改动状态」与「持久化 + 链接同步」始终成对发生。
   // 统一 Skills 仓库目录的绝对路径，空字符串表示尚未配置。
   const repositoryPath = ref("");
   // 仓库扫描结果，元素形如 { id, name, relativePath, folderName, sourcePath }。
@@ -55,12 +67,19 @@ export const useAppStore = defineStore("app", () => {
   // 文件与数据库操作必须串行，避免快速重复点击产生两轮相互覆盖的链接同步。
   let operationInFlight = false;
   // 应用配置开关使用短防抖合并；快速开关回到原状态时不会触碰数据库或链接。
+  // 待提交队列：agentId → { baseSkillIds, skillIds, waiters }；
+  // baseSkillIds 是入队时的原始选择，用于判断「是否真的变化」以及提交失败后的回滚。
   const pendingSkillSyncs = new Map();
+  // 防抖定时器句柄：为 undefined 表示当前没有排队中的提交。
   let skillSyncTimer;
+  // 是否正在把某项变更提交给 preload，避免同一个 flush 被重入导致同一 Agent 重复落库。
   let skillSyncFlushing = false;
+  // 300ms 足以合并「连续勾选多个 Skill」与「误触后立即改回」，
+  // 又短到用户不会觉得开关响应迟滞；调大或调小都会在流畅性与即时性之间失衡。
   const SKILL_SYNC_DEBOUNCE_MS = 300;
 
   // ---------- 派生状态 ----------
+  // 派生状态只供界面做条件渲染与统计，不参与持久化，因此不提供写入方法。
   // 是否已经配置过统一 Skills 仓库目录。
   const hasRepository = computed(() => Boolean(repositoryPath.value));
 
@@ -79,11 +98,14 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 让出一个宏任务，使 Vue 有机会先绘制忙碌状态和进度条。 */
+  // 为什么不能省：preload 的大量文件操作会在同一个事件循环里接连 await，
+  // 不让出一次宏任务，界面在扫描期间会完全静止，用户会误以为插件卡死。
   function waitForRender() {
     return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   // ---------- 状态同步 ----------
+  // 所有服务端结果都先经 applyState 收敛到本地状态，页面不再各自解析接口返回值。
   /**
    * 将后端（preload 服务）返回的状态增量合并到本地响应式状态。
    * 未出现在 next 中的字段保持原值不变。
@@ -92,6 +114,7 @@ export const useAppStore = defineStore("app", () => {
    */
   function applyState(next) {
     // 部分接口（例如主题切换）只返回变更字段，避免无关状态被意外清空。
+    // 这里用 Object.hasOwn 而不是真值判断：空字符串、空数组同样是有效的新状态。
     if (Object.hasOwn(next, "repositoryPath"))
       repositoryPath.value = next.repositoryPath || "";
     if (Object.hasOwn(next, "skills"))
@@ -100,6 +123,8 @@ export const useAppStore = defineStore("app", () => {
       groups.value = Array.isArray(next.groups) ? next.groups : [];
     if (Object.hasOwn(next, "agents"))
       agents.value = Array.isArray(next.agents) ? next.agents : [];
+    // enabledSkills 是应用配置的唯一真值：Agent 目录下的受管链接完全由它推导，
+    // 因此合并要格外小心，不能让服务端返回的旧值覆盖用户刚点下的选择。
     if (Object.hasOwn(next, "enabledSkills")) {
       const mergedEnabledSkills = { ...(next.enabledSkills || {}) };
       // 服务端状态回写时保留尚在防抖窗口内的乐观选择，避免开关视觉回跳。
@@ -115,6 +140,7 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // ---------- 全局提示 ----------
+  // 提示是非阻断的反馈渠道：重要但不该打断操作，因此多条同时展示、各自倒计时后关闭。
   /**
    * 手动关闭一条提示，并清除其自动关闭定时器。
    *
@@ -122,6 +148,7 @@ export const useAppStore = defineStore("app", () => {
    */
   function dismissNotice(id) {
     notices.value = notices.value.filter((notice) => notice.id !== id);
+    // 定时器必须同步清理：否则被提前关闭的提示会留下空转的回调，长时间运行后不断累积。
     clearTimeout(noticeTimers.get(id));
     noticeTimers.delete(id);
   }
@@ -135,6 +162,7 @@ export const useAppStore = defineStore("app", () => {
    */
   function notify(message, type = "success", duration = 5200) {
     if (!message) return;
+    // 统一转成字符串再比较，避免数字、对象等异常入参让去重判断失效。
     const normalizedMessage = String(message);
     // 后台一致性校验可能重复发现同一问题；相同提示只保留一条，避免大量 DOM 与定时器堆积。
     if (
@@ -147,6 +175,7 @@ export const useAppStore = defineStore("app", () => {
     // 全局提示设置硬上限，异常链接很多时也不会拖慢渲染。
     while (notices.value.length >= 20)
       dismissNotice(notices.value[0].id);
+    // id 单调递增：提示可被手动关闭，用数组下标做 :key 会让 Vue 复用错的节点。
     const id = ++noticeSequence;
     notices.value.push({ id, message: normalizedMessage, type });
     // 错误保留更久；多条问题会同时展示，避免后一个提示覆盖前一个错误。
@@ -166,6 +195,7 @@ export const useAppStore = defineStore("app", () => {
    */
   function reportIssues(issues) {
     const safeIssues = Array.isArray(issues) ? issues : [];
+    // notify 自带同文案去重，重复出现的同类问题不会刷屏，也不会拖慢渲染。
     safeIssues.forEach((issue) =>
       notify(issue?.message, issue?.type || "warning"),
     );
@@ -173,6 +203,8 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // ---------- 统一操作封装 ----------
+  // 所有会触碰文件系统或数据库的动作都从这里走，避免每个页面重复实现
+  // 「置忙 → 提示 → 回滚」三件事，也保证串行锁不会被漏掉。
   /**
    * 统一执行一次“可能改动本地状态”的业务操作。
    * 负责：置忙 → 调用接口 → 合并状态 → 展示问题 → 展示成功提示 → 异常兜底。
@@ -187,6 +219,7 @@ export const useAppStore = defineStore("app", () => {
     successMessage,
     { reportResultIssues = true } = {},
   ) {
+    // 并发守卫：宁可让后一次点击立刻失败并提示，也不能让两轮链接同步交叉执行。
     if (operationInFlight) {
       const error = new Error("已有操作正在进行，请等待完成后再试");
       notify(error.message, "warning");
@@ -197,8 +230,12 @@ export const useAppStore = defineStore("app", () => {
     try {
       // preload 调用前先让界面完成一次更新，即使底层偶发变慢也能看到明确的处理中状态。
       await waitForRender();
+      // 具体调用由上层传入（preload 服务），失败时抛出的是带中文说明的 Error。
       const result = await operation();
+      // 大多数接口返回最新全量状态，applyState 按字段合并，不会误清空其他数据。
       if (result) applyState(result);
+      // issues 表示「执行成功但存在异常」（例如某个链接被外部改动过）：
+      // 与抛错不同，这类问题只提示，不阻断后续流程。
       const issues = Array.isArray(result?.issues) ? result.issues : [];
       if (reportResultIssues) reportIssues(issues);
       // 存在 error 级问题时不再提示成功，避免“成功”与“失败”同时出现造成误导。
@@ -206,17 +243,23 @@ export const useAppStore = defineStore("app", () => {
         notify(successMessage);
       return result;
     } catch (error) {
+      // 直接展示 preload 抛出的中文文案，比包装成通用提示更利于定位问题。
       notify(error?.message || "操作失败，请重试", "error");
       // 继续向上抛出，交给调用方决定是否中断后续流程。
       throw error;
     } finally {
+      // 无论成功还是失败都必须释放串行锁与忙碌状态，否则后续所有操作会被永久拒绝。
       operationInFlight = false;
       busy.value = false;
     }
   }
 
   // ---------- 应用配置开关合并 ----------
+  // 这一分区解决的核心问题是「高频开关 + 慢速磁盘」：开关动作不直接落库，
+  // 而是先更新界面，再把各 Agent 的最终选择合并成一次提交。
   /** 规范化 Skill id 数组，便于比较最终选择是否真正发生变化。 */
+  // 顺序与重复项都不影响磁盘上的链接集合，因此先转字符串、再去重排序，
+  // 这样「A、B」与「B、A、A」会被认定为同一次选择，避免多余写入。
   function normalizeSkillIds(skillIds) {
     return [
       ...new Set(Array.isArray(skillIds) ? skillIds.map(String) : []),
@@ -224,6 +267,7 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 判断两个 Skill 选择是否等价。 */
+  // 只有长度与逐项都相同才算「没有变化」；返回 true 时调用方会跳过 preload 调用。
   function skillIdsEqual(left, right) {
     const normalizedLeft = normalizeSkillIds(left);
     const normalizedRight = normalizeSkillIds(right);
@@ -234,6 +278,8 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 安排下一次防抖提交；其他业务操作进行中时稍后自动重试。 */
+  // 每次都重置定时器，所以连续切换只会触发一次真正的提交（合并等待者）。
+  // 延时参数用于「其他操作进行中」时的退避重试，见 flushPendingSkillSyncs。
   function scheduleSkillSync(delay = SKILL_SYNC_DEBOUNCE_MS) {
     clearTimeout(skillSyncTimer);
     skillSyncTimer = setTimeout(() => {
@@ -243,12 +289,17 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 顺序提交各 Agent 的最终 Skill 状态，确保不会与其他文件操作并发。 */
+  // 每次只提交一个 Agent：setAgentSkills 会刷新整份状态，逐个提交既能合并同一 Agent 的
+  // 连续选择，也不会长时间占住串行锁导致页面其他按钮一直不可用。
   async function flushPendingSkillSyncs() {
+    // 队列为空时直接返回，定时器回调可以安全空转。
     if (!pendingSkillSyncs.size) return;
+    // 已有文件操作在跑（或本函数正被重入）时退避重试，避免两轮同步交叉覆盖。
     if (skillSyncFlushing || operationInFlight) {
       scheduleSkillSync(100);
       return;
     }
+    // 先出队再提交：提交期间用户的新选择会重新入队，下一轮会以最新终态提交。
     const [agentId, pending] = pendingSkillSyncs.entries().next().value;
     pendingSkillSyncs.delete(agentId);
     skillSyncFlushing = true;
@@ -260,18 +311,23 @@ export const useAppStore = defineStore("app", () => {
         undefined,
         { reportResultIssues: false },
       );
+      // 同一个 Agent 在防抖窗口内的多次调用共享一个 Promise，全部等待者一起完成。
       pending.waiters.forEach(({ resolve }) => resolve(result));
     } catch (error) {
       // 没有更新的同 Agent 请求时才回滚乐观状态，避免覆盖用户刚做出的新选择。
+      // 回滚目标是入队时记录的 baseSkillIds（此时 enabledSkills 已被乐观更新改写）。
       if (!pendingSkillSyncs.has(agentId)) {
         enabledSkills.value = {
           ...enabledSkills.value,
           [agentId]: [...pending.baseSkillIds],
         };
       }
+      // 拒绝等待者，让页面里的 await 能感知失败；错误文案已由 execute 全局提示过。
       pending.waiters.forEach(({ reject }) => reject(error));
     } finally {
       skillSyncFlushing = false;
+      // 队列里还有别的 Agent 时立即安排下一轮（0ms 即下一个宏任务），
+      // 既不会饿死排队请求，也让界面在两轮提交之间有渲染机会。
       if (pendingSkillSyncs.size) scheduleSkillSync(0);
     }
   }
@@ -279,9 +335,17 @@ export const useAppStore = defineStore("app", () => {
   /**
    * 乐观更新 Skill 集合，并把防抖窗口内的多次切换合并成一次最终提交。
    * 若最终选择回到提交前状态，则直接完成等待，不调用 preload。
+   *
+   * 设计原因：应用配置页的开关是高频操作，每次点击都立刻落库会产生大量磁盘写入
+   * （链接同步要逐个创建或删除目录链接），界面也会因为反复等待 I/O 而卡顿。
+   *
+   * @param {string} agentId - 目标 Agent id
+   * @param {Array<string>} skillIds - 目标启用集合（完整覆盖，不是增量）
+   * @returns {Promise<object|null>} 落库后的服务端状态；终态与提交前相同（无需落库）时为 null
    */
   function setAgentSkillsDebounced(agentId, skillIds) {
     const normalizedIds = normalizeSkillIds(skillIds);
+    // baseSkillIds 只在首次入队时记录：它是「是否真的发生变化」与失败回滚的共同基准。
     let pending = pendingSkillSyncs.get(agentId);
     if (!pending) {
       pending = {
@@ -292,17 +356,22 @@ export const useAppStore = defineStore("app", () => {
       pendingSkillSyncs.set(agentId, pending);
     } else pending.skillIds = normalizedIds;
 
+    // 乐观更新：先改界面让开关立即响应；服务端回写或失败回滚时再修正为真实状态。
     enabledSkills.value = {
       ...enabledSkills.value,
       [agentId]: [...normalizedIds],
     };
 
+    // 每次调用都返回一个 Promise，页面可以 await 到「本次合并提交」的结果。
     const completion = new Promise((resolve, reject) => {
       pending.waiters.push({ resolve, reject });
     });
+    // 终态与提交前一致（快速开→关回到原点）时，直接完成等待并撤销排队，
+    // 完全不触碰数据库与磁盘链接，这正是防抖合并带来的收益。
     if (skillIdsEqual(pending.baseSkillIds, normalizedIds)) {
       pendingSkillSyncs.delete(agentId);
       pending.waiters.forEach(({ resolve }) => resolve(null));
+      // 队列已空就取消定时器，避免留下没有意义的空转回调。
       if (!pendingSkillSyncs.size) clearTimeout(skillSyncTimer);
       else scheduleSkillSync();
     } else scheduleSkillSync();
@@ -310,20 +379,25 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 取消指定 Agent 尚未落库的开关请求，用于删除 Agent 前收敛前端状态。 */
+  // 必须做这一步：若不取消，延迟任务会在 Agent 已被删除后再次调用 setAgentSkills，
+  // 服务端会以「未找到该 Agent」失败，用户会看到莫名其妙的报错。
   function cancelPendingAgentSkills(agentId) {
     const pending = pendingSkillSyncs.get(agentId);
     if (!pending) return;
+    // 等待者以 null 完成（表示「不必再提交」），不抛错，避免打断删除或清除流程。
     pendingSkillSyncs.delete(agentId);
     pending.waiters.forEach(({ resolve }) => resolve(null));
     if (!pendingSkillSyncs.size) clearTimeout(skillSyncTimer);
   }
 
   /** 清除所有尚未落库的开关请求，避免清除数据后又被延迟任务恢复。 */
+  // 先取 key 的副本再遍历，因为 cancelPendingAgentSkills 会就地删除 Map 中的条目。
   function cancelAllPendingAgentSkills() {
     [...pendingSkillSyncs.keys()].forEach(cancelPendingAgentSkills);
   }
 
   // ---------- 确认对话框 ----------
+  // 只用于不可逆操作（删除 Agent、清除数据），普通增删改不需要二次确认。
   /**
    * 弹出全局确认对话框，并等待用户选择结果。
    *
@@ -331,9 +405,11 @@ export const useAppStore = defineStore("app", () => {
    * @returns {Promise<boolean>} true 表示用户点了确认，false 表示取消或关闭
    */
   // 返回 Promise，让业务页面可以用统一方式等待用户选择。
+  // 全局只有一份对话框实例，由 App.vue 的 ConfirmDialog 渲染，页面无需自建弹窗。
   function confirm(options) {
     // 若上一个对话框尚未收尾，先按“取消”处理，避免 Promise 永远挂起。
     if (dialogResolver) dialogResolver(false);
+    // 未传的字段统一走默认值，保证对话框不会出现空白按钮或空标题。
     dialog.value = {
       open: true,
       title: options.title || "请确认",
@@ -354,23 +430,30 @@ export const useAppStore = defineStore("app", () => {
    * @param {boolean} accepted - 是否点击了确认按钮
    */
   function resolveDialog(accepted) {
+    // 先关弹窗再回传结果：用户可以重复点击按钮，而 Promise 只允许被 resolve 一次。
     dialog.value.open = false;
     dialogResolver?.(accepted);
     dialogResolver = null;
   }
 
   // ---------- 初始化与主题 ----------
+  // 初始化只读数据库缓存、主题切换只写数据库：两者都不依赖仓库在线，保证插件随时可用。
   /**
    * 插件启动时读取 uTools 本地数据库中的配置，并同步到界面。
    * 未运行在 uTools 环境时退化为浅色主题，保证在浏览器预览时仍可用。
    */
   async function initialize() {
+    // 启动分两步：先只读数据库缓存（很快）完成首屏绘制，再异步做一致性校验，
+    // 这样即使仓库很大、磁盘很慢，窗口也不会卡在空白加载态。
     let needsReconcile = false;
     try {
+      // 浏览器预览（vite dev 直接打开页面）没有 preload，此时跳过读取。
       if (window.skillsManager) {
+        // getState 不扫描仓库、不改链接，只把上次完整扫描的缓存返回给界面。
         const result = await api().getState();
         applyState(result);
         reportIssues(result?.issues);
+        // 全新环境（没有仓库也没有 Agent）没有必要去扫磁盘，省掉一次后台开销。
         needsReconcile = Boolean(
           result?.repositoryPath ||
             result?.groups?.length ||
@@ -388,8 +471,11 @@ export const useAppStore = defineStore("app", () => {
     // 首屏缓存状态已经绘制后，再异步检查仓库和链接；失败由 execute 统一提示。
     if (needsReconcile && api().reconcile) {
       try {
+        // 这一步才会真正扫描仓库并同步受管链接；耗时较长，因此放在首屏之后。
         await execute(() => api().reconcile());
       } catch (_) {}
+      // 失败（例如只读保护、仓库被移走）已由 execute 统一提示，这里静默吞掉即可，
+      // 否则会在控制台留下未处理的 Promise 拒绝。
     }
   }
 
@@ -400,12 +486,15 @@ export const useAppStore = defineStore("app", () => {
    * @returns {Promise<boolean>} 是否保存成功
    */
   async function setTheme(nextTheme) {
+    // 非法取值直接忽略，避免把异常主题写进数据库后持久污染界面。
     if (nextTheme !== "light" && nextTheme !== "dark") return false;
+    // 记录旧值，用于写入失败（如只读保护）时回滚。
     const previousTheme = theme.value;
     // 立即生效，避免等待磁盘写入造成界面迟滞。
     document.documentElement.classList.toggle("dark", nextTheme === "dark");
     theme.value = nextTheme;
     try {
+      // 浏览器预览环境没有 preload，只切换界面主题，不做持久化。
       if (window.skillsManager) {
         const result = await api().setTheme(nextTheme);
         applyState(result);
@@ -429,6 +518,7 @@ export const useAppStore = defineStore("app", () => {
    *
    * @returns {Promise<boolean>} 是否保存成功
    */
+  // 只负责决定目标主题，乐观更新与失败回滚全部复用 setTheme。
   function toggleTheme() {
     return setTheme(theme.value === "dark" ? "light" : "dark");
   }
@@ -447,6 +537,7 @@ export const useAppStore = defineStore("app", () => {
     busy,
     notices,
     dialog,
+    // 状态与纯本地方法按原名导出，页面可直接以 store.xxx 消费（只读使用）。
     hasRepository,
     initialize,
     setTheme,
@@ -474,6 +565,7 @@ export const useAppStore = defineStore("app", () => {
         agent.id ? "Agent 已更新" : "Agent 已添加",
       ),
     // 删除 Agent，同时清理本应用在其目录创建的链接。
+    // 先取消该 Agent 尚未落库的开关请求，否则延迟任务会在 Agent 已删除后再提交而失败。
     deleteAgent: (id) => {
       cancelPendingAgentSkills(id);
       return execute(
@@ -482,11 +574,13 @@ export const useAppStore = defineStore("app", () => {
       );
     },
     // 清除 uTools 本地数据库配置（保留仓库中的源文件）。
+    // 同样要先取消全部排队请求，否则清空后会被延迟任务把旧配置重新写回数据库。
     clearData: () => {
       cancelAllPendingAgentSkills();
       return execute(() => api().clearData(), "本地数据已清除");
     },
     // 设置某个 Agent 启用的 Skills，分组与单项开关统一复用该入口。
+    // 注意暴露的是防抖版本：页面连续调用只会产生一次最终落库（见上文合并逻辑）。
     setAgentSkills: setAgentSkillsDebounced,
   };
 });
