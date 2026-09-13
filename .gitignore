@@ -1,3 +1,6 @@
+# 忽略规则说明：源码与配置文件（含 public/plugin.json、public/preload/services.js）需要提交，
+# 以下仅为日志、依赖、构建产物与本地编辑器配置。
+
 # Logs
 logs
 *.log

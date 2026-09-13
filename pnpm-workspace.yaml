@@ -1,2 +1,4 @@
+# pnpm 工作区配置文件：由 pnpm 读取，用于声明依赖包构建脚本的放行设置。
+# 说明：本文件不参与 uTools 插件运行，仅影响本地安装依赖时的行为。
 allowBuilds:
   esbuild: set this to true or false

@@ -1,53 +1,77 @@
+/* 全局样式入口：由 Tailwind 4 统一提供基础样式、工具类与主题变量 */
 @import "tailwindcss";
 
+/* 深色模式变体：以 <html class="dark"> 作为开关（由 appStore 维护），
+   dark:xxx 工具类在 .dark 自身及其后代元素上生效 */
 @custom-variant dark (&:where(.dark, .dark *));
 
 /* 颜色只在令牌层定义，组件内全部通过 Tailwind 语义类使用。 */
+/* 浅色主题（默认主题）：:root 中的变量即设计令牌，深色主题在 .dark 中覆盖同名变量 */
 :root {
+  /* 主色系：品牌色、悬停色、浅色底、描边色以及主色之上的文字色 */
   --ui-primary: #2563eb;
   --ui-primary-hover: #1d4ed8;
   --ui-primary-soft: #eff6ff;
   --ui-primary-border: #bfdbfe;
   --ui-on-primary: #ffffff;
+  /* 开关控件滑块颜色 */
   --ui-control-thumb: #ffffff;
+  /* 背景层级：canvas 页面底色 / surface 卡片底色 / surface-raised 浮层底色 */
   --ui-canvas: #f6f8fc;
   --ui-surface: #ffffff;
   --ui-surface-raised: #ffffff;
+  /* 描边层级：border 常规分隔线 / border-strong 输入框等需要更明显的描边 */
   --ui-border: #dde3ec;
   --ui-border-strong: #cbd4e1;
+  /* 文字层级：ink 正文 / ink-secondary 次级说明 / ink-muted 弱提示文字 */
   --ui-ink: #172033;
   --ui-ink-secondary: #596579;
   --ui-ink-muted: #8b96a8;
+  /* 危险状态：删除、清除数据等破坏性操作使用 */
   --ui-danger: #dc2626;
   --ui-danger-soft: #fef2f2;
+  /* 警告状态：非致命的数据异常提示使用 */
   --ui-warning: #a16207;
   --ui-warning-soft: #fefce8;
+  /* 模态遮罩：半透明深色，用于确认对话框背景 */
   --ui-overlay: rgb(15 23 42 / 45%);
 }
 
+/* 深色主题：仅覆盖令牌值，组件类名无需改动即可整体换肤 */
 .dark {
+  /* 告知浏览器当前是深色配色，滚动条、表单控件等原生外观会随之切换 */
   color-scheme: dark;
+  /* 主色系：深色底上使用更亮的蓝，保证对比度 */
   --ui-primary: #60a5fa;
   --ui-primary-hover: #3b82f6;
   --ui-primary-soft: #172554;
   --ui-primary-border: #1e40af;
   --ui-on-primary: #ffffff;
+  /* 开关控件滑块颜色（深色下略偏灰白，避免刺眼） */
   --ui-control-thumb: #f8fafc;
+  /* 背景层级：整体压暗，卡片与浮层逐级提亮以体现层次 */
   --ui-canvas: #0f172a;
   --ui-surface: #172033;
   --ui-surface-raised: #1e293b;
+  /* 描边层级：深色底上使用低饱和蓝灰 */
   --ui-border: #2d3a4f;
   --ui-border-strong: #475569;
+  /* 文字层级：深色底上使用高明度灰白，保证可读性 */
   --ui-ink: #f1f5f9;
   --ui-ink-secondary: #cbd5e1;
   --ui-ink-muted: #94a3b8;
+  /* 危险状态：深色底上使用更柔和的红色 */
   --ui-danger: #f87171;
   --ui-danger-soft: #451a1a;
+  /* 警告状态：深色底上使用亮黄色以提高辨识度 */
   --ui-warning: #facc15;
   --ui-warning-soft: #422006;
+  /* 模态遮罩：深色主题下进一步加深，突出对话框内容 */
   --ui-overlay: rgb(2 6 23 / 70%);
 }
 
+/* 把设计令牌映射为 Tailwind 语义色，实现 bg-canvas、text-ink、border-border 等工具类；
+   inline 表示直接引用变量本身，使主题切换无需重新编译样式 */
 @theme inline {
   --color-primary: var(--ui-primary);
   --color-primary-hover: var(--ui-primary-hover);
@@ -68,5 +92,6 @@
   --color-warning: var(--ui-warning);
   --color-warning-soft: var(--ui-warning-soft);
   --color-overlay: var(--ui-overlay);
+  /* 全局字体栈：优先使用 Inter，其次回退到系统界面字体与中文黑体 */
   --font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
