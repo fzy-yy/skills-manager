@@ -10,10 +10,12 @@
   </head>
   <!-- body 直接承担全局排版：m-0 清除默认外边距、overflow-hidden 禁止整页滚动、text-sm/antialiased 统一字号与抗锯齿；
        bg-canvas、font-sans、text-ink 等语义类均来自 src/main.css 中定义的设计令牌 -->
-  <body class="m-0 overflow-hidden bg-canvas font-sans text-sm text-ink antialiased">
+  <body
+    class="m-0 overflow-hidden bg-canvas font-sans text-sm text-ink antialiased"
+  >
     <!-- Vue 应用挂载点：src/main.js 会把根组件 App.vue 渲染到该容器；
          h-screen 让容器撑满插件窗口高度、min-w-[620px] 保证窗口变窄时布局不塌陷 -->
-    <div id="app" class="h-screen min-w-[620px]"></div>
+    <div id="app" class="h-screen min-w-155"></div>
     <!-- 前端入口脚本：由 Vite 打包为普通 JS 后 uTools 才能识别（uTools 仅识别 html/css/js） -->
     <script type="module" src="/src/main.js"></script>
   </body>

@@ -11,44 +11,51 @@
  */
 
 // Vue 响应式 API：ref 定义状态，computed 定义派生状态。
-import { computed, ref } from 'vue'
+import { computed, ref } from "vue";
 // Pinia 的组合式仓库定义函数。
-import { defineStore } from 'pinia'
+import { defineStore } from "pinia";
 
 // Pinia 统一管理业务数据、主题、全局提示与确认对话框。
-export const useAppStore = defineStore('app', () => {
+export const useAppStore = defineStore("app", () => {
   // ---------- 业务状态 ----------
   // 统一 Skills 仓库目录的绝对路径，空字符串表示尚未配置。
-  const repositoryPath = ref('')
+  const repositoryPath = ref("");
   // 仓库扫描结果，元素形如 { id, name, relativePath, folderName, sourcePath }。
-  const skills = ref([])
+  const skills = ref([]);
   // 分组列表，元素形如 { id, name, skillIds }。
-  const groups = ref([])
+  const groups = ref([]);
   // Agent 列表；后端返回的是精简后的公开字段（含链接数量统计）。
-  const agents = ref([])
+  const agents = ref([]);
   // 每个 Agent 已启用的分组：{ [agentId]: groupId[] }。
-  const enabledGroups = ref({})
+  const enabledGroups = ref({});
   // 当前主题，取值 'light' 或 'dark'。
-  const theme = ref('light')
+  const theme = ref("light");
   // 是否已完成首次初始化（读取本地配置），用于避免首屏空白闪烁。
-  const ready = ref(false)
+  const ready = ref(false);
   // 是否有耗时操作正在进行，用于禁用按钮、显示顶部进度条。
-  const busy = ref(false)
+  const busy = ref(false);
   // 全局提示列表，元素形如 { id, message, type }。
-  const notices = ref([])
+  const notices = ref([]);
   // 全局确认对话框的显示状态与文案。
-  const dialog = ref({ open: false, title: '', message: '', confirmText: '确定', cancelText: '取消', tone: 'primary' })
+  const dialog = ref({
+    open: false,
+    title: "",
+    message: "",
+    confirmText: "确定",
+    cancelText: "取消",
+    tone: "primary",
+  });
 
   // 提示自增序号，保证每条提示都有唯一 key。
-  let noticeSequence = 0
+  let noticeSequence = 0;
   // 提示 id 与自动关闭定时器的映射，手动关闭时需要一并清理定时器。
-  const noticeTimers = new Map()
+  const noticeTimers = new Map();
   // 确认对话框的 resolve 函数，由 confirm() 赋值、resolveDialog() 调用。
-  let dialogResolver
+  let dialogResolver;
 
   // ---------- 派生状态 ----------
   // 是否已经配置过统一 Skills 仓库目录。
-  const hasRepository = computed(() => Boolean(repositoryPath.value))
+  const hasRepository = computed(() => Boolean(repositoryPath.value));
 
   // ---------- 内部工具 ----------
   /**
@@ -58,9 +65,10 @@ export const useAppStore = defineStore('app', () => {
    * @returns {object} window.skillsManager 实例
    * @throws {Error} 未在 uTools 环境运行时抛出可读错误，由调用方提示用户
    */
-  function api () {
-    if (!window.skillsManager) throw new Error('请在 uTools 开发环境中运行插件以使用本地目录功能')
-    return window.skillsManager
+  function api() {
+    if (!window.skillsManager)
+      throw new Error("请在 uTools 开发环境中运行插件以使用本地目录功能");
+    return window.skillsManager;
   }
 
   // ---------- 状态同步 ----------
@@ -70,16 +78,22 @@ export const useAppStore = defineStore('app', () => {
    *
    * @param {object} next - 形如 { repositoryPath, skills, groups, agents, enabledGroups, theme, issues }
    */
-  function applyState (next) {
+  function applyState(next) {
     // 部分接口（例如主题切换）只返回变更字段，避免无关状态被意外清空。
-    if (Object.hasOwn(next, 'repositoryPath')) repositoryPath.value = next.repositoryPath || ''
-    if (Object.hasOwn(next, 'skills')) skills.value = Array.isArray(next.skills) ? next.skills : []
-    if (Object.hasOwn(next, 'groups')) groups.value = Array.isArray(next.groups) ? next.groups : []
-    if (Object.hasOwn(next, 'agents')) agents.value = Array.isArray(next.agents) ? next.agents : []
-    if (Object.hasOwn(next, 'enabledGroups')) enabledGroups.value = next.enabledGroups || {}
-    if (Object.hasOwn(next, 'theme')) theme.value = next.theme === 'dark' ? 'dark' : 'light'
+    if (Object.hasOwn(next, "repositoryPath"))
+      repositoryPath.value = next.repositoryPath || "";
+    if (Object.hasOwn(next, "skills"))
+      skills.value = Array.isArray(next.skills) ? next.skills : [];
+    if (Object.hasOwn(next, "groups"))
+      groups.value = Array.isArray(next.groups) ? next.groups : [];
+    if (Object.hasOwn(next, "agents"))
+      agents.value = Array.isArray(next.agents) ? next.agents : [];
+    if (Object.hasOwn(next, "enabledGroups"))
+      enabledGroups.value = next.enabledGroups || {};
+    if (Object.hasOwn(next, "theme"))
+      theme.value = next.theme === "dark" ? "dark" : "light";
     // 主题以 <html class="dark"> 为开关，与 src/main.css 中的 .dark 令牌对应。
-    document.documentElement.classList.toggle('dark', theme.value === 'dark')
+    document.documentElement.classList.toggle("dark", theme.value === "dark");
   }
 
   // ---------- 全局提示 ----------
@@ -88,10 +102,10 @@ export const useAppStore = defineStore('app', () => {
    *
    * @param {number} id - 提示的唯一编号
    */
-  function dismissNotice (id) {
-    notices.value = notices.value.filter(notice => notice.id !== id)
-    clearTimeout(noticeTimers.get(id))
-    noticeTimers.delete(id)
+  function dismissNotice(id) {
+    notices.value = notices.value.filter((notice) => notice.id !== id);
+    clearTimeout(noticeTimers.get(id));
+    noticeTimers.delete(id);
   }
 
   /**
@@ -101,13 +115,16 @@ export const useAppStore = defineStore('app', () => {
    * @param {'success'|'error'|'warning'|'info'} [type='success'] - 提示类型，决定配色与图标
    * @param {number} [duration=5200] - 自动关闭时间（毫秒），错误类型会被强制延长
    */
-  function notify (message, type = 'success', duration = 5200) {
-    if (!message) return
-    const id = ++noticeSequence
-    notices.value.push({ id, message: String(message), type })
+  function notify(message, type = "success", duration = 5200) {
+    if (!message) return;
+    const id = ++noticeSequence;
+    notices.value.push({ id, message: String(message), type });
     // 错误保留更久；多条问题会同时展示，避免后一个提示覆盖前一个错误。
-    const timeout = type === 'error' ? Math.max(duration, 9000) : duration
-    noticeTimers.set(id, setTimeout(() => dismissNotice(id), timeout))
+    const timeout = type === "error" ? Math.max(duration, 9000) : duration;
+    noticeTimers.set(
+      id,
+      setTimeout(() => dismissNotice(id), timeout),
+    );
   }
 
   /**
@@ -117,10 +134,12 @@ export const useAppStore = defineStore('app', () => {
    * @param {Array<{type?: string, message: string}>} issues - 问题列表
    * @returns {Array} 原样返回入参，便于调用方继续判断是否包含 error
    */
-  function reportIssues (issues) {
-    const safeIssues = Array.isArray(issues) ? issues : []
-    safeIssues.forEach(issue => notify(issue?.message, issue?.type || 'warning'))
-    return safeIssues
+  function reportIssues(issues) {
+    const safeIssues = Array.isArray(issues) ? issues : [];
+    safeIssues.forEach((issue) =>
+      notify(issue?.message, issue?.type || "warning"),
+    );
+    return safeIssues;
   }
 
   // ---------- 统一操作封装 ----------
@@ -132,21 +151,22 @@ export const useAppStore = defineStore('app', () => {
    * @param {string} [successMessage] - 成功提示文案；若存在 error 级问题则不提示成功
    * @returns {Promise<object>} preload 服务返回的最新状态
    */
-  async function execute (operation, successMessage) {
-    busy.value = true
+  async function execute(operation, successMessage) {
+    busy.value = true;
     try {
-      const result = await operation()
-      if (result) applyState(result)
-      const issues = reportIssues(result?.issues)
+      const result = await operation();
+      if (result) applyState(result);
+      const issues = reportIssues(result?.issues);
       // 存在 error 级问题时不再提示成功，避免“成功”与“失败”同时出现造成误导。
-      if (successMessage && !issues.some(issue => issue?.type === 'error')) notify(successMessage)
-      return result
+      if (successMessage && !issues.some((issue) => issue?.type === "error"))
+        notify(successMessage);
+      return result;
     } catch (error) {
-      notify(error?.message || '操作失败，请重试', 'error')
+      notify(error?.message || "操作失败，请重试", "error");
       // 继续向上抛出，交给调用方决定是否中断后续流程。
-      throw error
+      throw error;
     } finally {
-      busy.value = false
+      busy.value = false;
     }
   }
 
@@ -158,18 +178,20 @@ export const useAppStore = defineStore('app', () => {
    * @returns {Promise<boolean>} true 表示用户点了确认，false 表示取消或关闭
    */
   // 返回 Promise，让业务页面可以用统一方式等待用户选择。
-  function confirm (options) {
+  function confirm(options) {
     // 若上一个对话框尚未收尾，先按“取消”处理，避免 Promise 永远挂起。
-    if (dialogResolver) dialogResolver(false)
+    if (dialogResolver) dialogResolver(false);
     dialog.value = {
       open: true,
-      title: options.title || '请确认',
-      message: options.message || '',
-      confirmText: options.confirmText || '确定',
-      cancelText: options.cancelText || '取消',
-      tone: options.tone || 'primary'
-    }
-    return new Promise(resolve => { dialogResolver = resolve })
+      title: options.title || "请确认",
+      message: options.message || "",
+      confirmText: options.confirmText || "确定",
+      cancelText: options.cancelText || "取消",
+      tone: options.tone || "primary",
+    };
+    return new Promise((resolve) => {
+      dialogResolver = resolve;
+    });
   }
 
   /**
@@ -178,10 +200,10 @@ export const useAppStore = defineStore('app', () => {
    *
    * @param {boolean} accepted - 是否点击了确认按钮
    */
-  function resolveDialog (accepted) {
-    dialog.value.open = false
-    dialogResolver?.(accepted)
-    dialogResolver = null
+  function resolveDialog(accepted) {
+    dialog.value.open = false;
+    dialogResolver?.(accepted);
+    dialogResolver = null;
   }
 
   // ---------- 初始化与主题 ----------
@@ -189,20 +211,20 @@ export const useAppStore = defineStore('app', () => {
    * 插件启动时读取 uTools 本地数据库中的配置，并同步到界面。
    * 未运行在 uTools 环境时退化为浅色主题，保证在浏览器预览时仍可用。
    */
-  async function initialize () {
+  async function initialize() {
     try {
       if (window.skillsManager) {
-        const result = await api().getState()
-        applyState(result)
-        reportIssues(result?.issues)
+        const result = await api().getState();
+        applyState(result);
+        reportIssues(result?.issues);
       }
       // 非 uTools 环境没有持久化能力，强制使用浅色主题，避免残留 class。
-      else document.documentElement.classList.remove('dark')
+      else document.documentElement.classList.remove("dark");
     } catch (error) {
-      notify(error.message, 'error')
+      notify(error.message, "error");
     } finally {
       // 无论成功失败都标记为已初始化，避免页面一直停留在加载态。
-      ready.value = true
+      ready.value = true;
     }
   }
 
@@ -212,25 +234,28 @@ export const useAppStore = defineStore('app', () => {
    * @param {'light'|'dark'} nextTheme - 目标主题
    * @returns {Promise<boolean>} 是否保存成功
    */
-  async function setTheme (nextTheme) {
-    if (nextTheme !== 'light' && nextTheme !== 'dark') return false
-    const previousTheme = theme.value
+  async function setTheme(nextTheme) {
+    if (nextTheme !== "light" && nextTheme !== "dark") return false;
+    const previousTheme = theme.value;
     // 立即生效，避免等待磁盘写入造成界面迟滞。
-    document.documentElement.classList.toggle('dark', nextTheme === 'dark')
-    theme.value = nextTheme
+    document.documentElement.classList.toggle("dark", nextTheme === "dark");
+    theme.value = nextTheme;
     try {
       if (window.skillsManager) {
-        const result = await api().setTheme(nextTheme)
-        applyState(result)
-        reportIssues(result?.issues)
+        const result = await api().setTheme(nextTheme);
+        applyState(result);
+        reportIssues(result?.issues);
       }
-      return true
+      return true;
     } catch (error) {
       // 保存失败时回滚到切换前的主题，保持界面与数据库一致。
-      theme.value = previousTheme
-      document.documentElement.classList.toggle('dark', previousTheme === 'dark')
-      notify(error.message, 'error')
-      return false
+      theme.value = previousTheme;
+      document.documentElement.classList.toggle(
+        "dark",
+        previousTheme === "dark",
+      );
+      notify(error.message, "error");
+      return false;
     }
   }
 
@@ -239,33 +264,57 @@ export const useAppStore = defineStore('app', () => {
    *
    * @returns {Promise<boolean>} 是否保存成功
    */
-  function toggleTheme () {
-    return setTheme(theme.value === 'dark' ? 'light' : 'dark')
+  function toggleTheme() {
+    return setTheme(theme.value === "dark" ? "light" : "dark");
   }
 
   // ---------- 对外暴露 ----------
   // 状态与纯本地方法直接导出；所有会触碰文件系统或数据库的动作都包一层 execute()，
   // 以获得统一的忙碌状态、错误提示与状态回写。
   return {
-    repositoryPath, skills, groups, agents, enabledGroups, theme, ready, busy, notices, dialog, hasRepository,
-    initialize, setTheme, toggleTheme, notify, confirm, resolveDialog,
+    repositoryPath,
+    skills,
+    groups,
+    agents,
+    enabledGroups,
+    theme,
+    ready,
+    busy,
+    notices,
+    dialog,
+    hasRepository,
+    initialize,
+    setTheme,
+    toggleTheme,
+    notify,
+    confirm,
+    resolveDialog,
     // 关闭单条提示（App.vue 的提示卡片关闭按钮会调用）。
     dismissNotice,
     // 打开系统目录选择框，仅返回路径，不修改任何配置，因此无需 execute 包装。
-    chooseDirectory: current => api().chooseDirectory(current),
+    chooseDirectory: (current) => api().chooseDirectory(current),
     // 设置统一 Skills 仓库目录，成功后服务端会重新扫描并同步链接。
-    setRepository: directory => execute(() => api().setRepository(directory), 'Skills 仓库已更新'),
+    setRepository: (directory) =>
+      execute(() => api().setRepository(directory), "Skills 仓库已更新"),
     // 重新扫描仓库目录（不修改仓库路径）。
-    refreshSkills: () => execute(() => api().refreshSkills(), '已重新扫描 Skills'),
+    refreshSkills: () =>
+      execute(() => api().refreshSkills(), "已重新扫描 Skills"),
     // 保存分组列表（新增、改名、增删 Skills 均复用该接口）。
-    saveGroups: nextGroups => execute(() => api().saveGroups(nextGroups), '分组已保存'),
+    saveGroups: (nextGroups) =>
+      execute(() => api().saveGroups(nextGroups), "分组已保存"),
     // 新增或更新 Agent（携带 id 表示更新）。
-    upsertAgent: agent => execute(() => api().upsertAgent(agent), agent.id ? 'Agent 已更新' : 'Agent 已添加'),
+    upsertAgent: (agent) =>
+      execute(
+        () => api().upsertAgent(agent),
+        agent.id ? "Agent 已更新" : "Agent 已添加",
+      ),
     // 删除 Agent，同时清理本应用在其目录创建的链接。
-    deleteAgent: id => execute(() => api().deleteAgent(id), 'Agent 已删除，相关链接已清理'),
+    deleteAgent: (id) =>
+      execute(() => api().deleteAgent(id), "Agent 已删除，相关链接已清理"),
     // 清除 uTools 本地数据库配置（保留仓库中的源文件）。
-    clearData: () => execute(() => api().clearData(), '本地数据已清除'),
+    clearData: () => execute(() => api().clearData(), "本地数据已清除"),
     // 设置某个 Agent 启用的分组，服务端据此差量创建/移除链接。
-    setAgentGroups: (agentId, groupIds) => execute(() => api().setAgentGroups(agentId, groupIds), '链接配置已同步')
-  }
-})
+    setAgentGroups: (agentId, groupIds) =>
+      execute(() => api().setAgentGroups(agentId, groupIds), "链接配置已同步"),
+  };
+});

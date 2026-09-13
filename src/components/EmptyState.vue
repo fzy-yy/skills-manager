@@ -9,7 +9,7 @@
 -->
 <script setup>
 // 默认图标：问号圆圈，调用方未传 icon 时使用。
-import { CircleHelp } from '@lucide/vue'
+import { CircleHelp } from "@lucide/vue";
 
 // 组件属性定义。
 defineProps({
@@ -18,15 +18,19 @@ defineProps({
   // 空状态标题，必填。
   title: { type: String, required: true },
   // 补充说明文案，用于告诉用户下一步该做什么，必填。
-  description: { type: String, required: true }
-})
+  description: { type: String, required: true },
+});
 </script>
 
 <template>
   <!-- 居中容器：min-h-64 保证即使内容很少也有足够的视觉留白 -->
-  <div class="flex min-h-64 flex-col items-center justify-center px-8 py-10 text-center text-ink-secondary">
+  <div
+    class="flex min-h-64 flex-col items-center justify-center px-8 py-10 text-center text-ink-secondary"
+  >
     <!-- 图标容器：主色浅底 + 描边，强化视觉焦点 -->
-    <span class="mb-3 grid size-12 place-items-center rounded-xl border border-primary-border bg-primary-soft text-primary">
+    <span
+      class="mb-3 grid size-12 place-items-center rounded-xl border border-primary-border bg-primary-soft text-primary"
+    >
       <component :is="icon" :size="24" :stroke-width="1.8" />
     </span>
     <!-- 标题与描述：描述限宽 max-w-md，避免长文案折行过于零散 -->

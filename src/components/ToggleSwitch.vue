@@ -10,9 +10,9 @@
 -->
 <script setup>
 // defineProps 声明：modelValue 控制开关状态，disabled 控制可用性，label 用于无障碍朗读。
-defineProps({ modelValue: Boolean, disabled: Boolean, label: String })
+defineProps({ modelValue: Boolean, disabled: Boolean, label: String });
 // 抛出开关状态变化事件（值为取反后的新状态）。
-const emit = defineEmits(['update:modelValue'])
+const emit = defineEmits(["update:modelValue"]);
 </script>
 
 <template>
@@ -20,7 +20,9 @@ const emit = defineEmits(['update:modelValue'])
   <button
     type="button"
     class="flex h-6 w-11 shrink-0 items-center rounded-full border-0 p-0.5 outline-none ring-primary-soft focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50"
-    :class="modelValue ? 'justify-end bg-primary' : 'justify-start bg-border-strong'"
+    :class="
+      modelValue ? 'justify-end bg-primary' : 'justify-start bg-border-strong'
+    "
     :aria-pressed="modelValue"
     :aria-label="label"
     :disabled="disabled"
