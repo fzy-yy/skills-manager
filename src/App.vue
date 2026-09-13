@@ -38,11 +38,13 @@ onMounted(() => {
 
     <main class="min-h-0 flex-1 overflow-auto"><RouterView /></main>
 
-    <div v-if="store.notice" class="fixed right-5 bottom-5 z-40 flex min-h-11 max-w-[min(440px,calc(100vw-40px))] items-center gap-2.5 rounded-lg px-3 py-2.5 shadow-xl" :class="store.notice.type === 'error' ? 'bg-danger text-on-primary' : store.notice.type === 'warning' ? 'border border-warning bg-warning-soft text-warning' : 'bg-ink text-surface'" role="status">
-      <CircleAlert v-if="store.notice.type === 'error'" class="shrink-0" :size="17" />
-      <Check v-else class="shrink-0" :size="17" />
-      <span>{{ store.notice.message }}</span>
-      <button class="ml-2 grid size-6 place-items-center rounded border-0 bg-transparent text-current hover:bg-surface/10" type="button" aria-label="关闭提示" @click="store.dismissNotice"><X :size="16" /></button>
+    <div v-if="store.notices.length" class="fixed right-5 bottom-5 z-40 flex max-h-[min(70vh,520px)] w-[min(480px,calc(100vw-40px))] flex-col gap-2 overflow-y-auto" aria-live="polite">
+      <div v-for="notice in store.notices" :key="notice.id" class="flex min-h-11 items-start gap-2.5 rounded-lg px-3 py-2.5 shadow-xl" :class="notice.type === 'error' ? 'bg-danger text-on-primary' : notice.type === 'warning' ? 'border border-warning bg-warning-soft text-warning' : notice.type === 'info' ? 'border border-primary-border bg-primary-soft text-primary' : 'bg-ink text-surface'" :role="notice.type === 'error' ? 'alert' : 'status'">
+        <CircleAlert v-if="notice.type === 'error' || notice.type === 'warning'" class="mt-0.5 shrink-0" :size="17" />
+        <Check v-else class="mt-0.5 shrink-0" :size="17" />
+        <span class="min-w-0 flex-1 break-words leading-5">{{ notice.message }}</span>
+        <button class="grid size-6 shrink-0 place-items-center rounded border-0 bg-transparent text-current hover:bg-surface/10" type="button" aria-label="关闭提示" @click="store.dismissNotice(notice.id)"><X :size="16" /></button>
+      </div>
     </div>
 
     <div v-if="store.busy" class="fixed top-0 left-0 z-[60] h-0.5 w-full bg-primary" aria-label="处理中" />

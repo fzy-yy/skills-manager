@@ -27,14 +27,7 @@ watch(() => store.agents, agents => {
 
 async function setGroup (groupId, enabled) {
   const next = enabled ? [...activeGroups.value, groupId] : activeGroups.value.filter(id => id !== groupId)
-  try {
-    const result = await store.setAgentGroups(selectedAgentId.value, next)
-    const conflicts = result?.syncResult?.conflicts || []
-    store.notify(
-      conflicts.length ? `配置已应用，但有 ${conflicts.length} 个同名目录未被替换` : '链接配置已同步',
-      conflicts.length ? 'warning' : 'success'
-    )
-  } catch (_) {}
+  try { await store.setAgentGroups(selectedAgentId.value, next) } catch (_) {}
 }
 </script>
 

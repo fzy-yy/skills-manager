@@ -11,10 +11,11 @@ export const useAppStore = defineStore('app', () => {
   const theme = ref('light')
   const ready = ref(false)
   const busy = ref(false)
-  const notice = ref(null)
+  const notices = ref([])
   const dialog = ref({ open: false, title: '', message: '', confirmText: '确定', cancelText: '取消', tone: 'primary' })
 
-  let noticeTimer
+  let noticeSequence = 0
+  const noticeTimers = new Map()
   let dialogResolver
 
   const hasRepository = computed(() => Boolean(repositoryPath.value))
@@ -25,19 +26,35 @@ export const useAppStore = defineStore('app', () => {
   }
 
   function applyState (next) {
-    repositoryPath.value = next.repositoryPath || ''
-    skills.value = next.skills || []
-    groups.value = next.groups || []
-    agents.value = next.agents || []
-    enabledGroups.value = next.enabledGroups || {}
-    theme.value = next.theme === 'dark' ? 'dark' : 'light'
+    // 部分接口（例如主题切换）只返回变更字段，避免无关状态被意外清空。
+    if (Object.hasOwn(next, 'repositoryPath')) repositoryPath.value = next.repositoryPath || ''
+    if (Object.hasOwn(next, 'skills')) skills.value = Array.isArray(next.skills) ? next.skills : []
+    if (Object.hasOwn(next, 'groups')) groups.value = Array.isArray(next.groups) ? next.groups : []
+    if (Object.hasOwn(next, 'agents')) agents.value = Array.isArray(next.agents) ? next.agents : []
+    if (Object.hasOwn(next, 'enabledGroups')) enabledGroups.value = next.enabledGroups || {}
+    if (Object.hasOwn(next, 'theme')) theme.value = next.theme === 'dark' ? 'dark' : 'light'
     document.documentElement.classList.toggle('dark', theme.value === 'dark')
   }
 
-  function notify (message, type = 'success') {
-    notice.value = { message, type }
-    clearTimeout(noticeTimer)
-    noticeTimer = setTimeout(() => { notice.value = null }, 3600)
+  function dismissNotice (id) {
+    notices.value = notices.value.filter(notice => notice.id !== id)
+    clearTimeout(noticeTimers.get(id))
+    noticeTimers.delete(id)
+  }
+
+  function notify (message, type = 'success', duration = 5200) {
+    if (!message) return
+    const id = ++noticeSequence
+    notices.value.push({ id, message: String(message), type })
+    // 错误保留更久；多条问题会同时展示，避免后一个提示覆盖前一个错误。
+    const timeout = type === 'error' ? Math.max(duration, 9000) : duration
+    noticeTimers.set(id, setTimeout(() => dismissNotice(id), timeout))
+  }
+
+  function reportIssues (issues) {
+    const safeIssues = Array.isArray(issues) ? issues : []
+    safeIssues.forEach(issue => notify(issue?.message, issue?.type || 'warning'))
+    return safeIssues
   }
 
   async function execute (operation, successMessage) {
@@ -45,7 +62,8 @@ export const useAppStore = defineStore('app', () => {
     try {
       const result = await operation()
       if (result) applyState(result)
-      if (successMessage) notify(successMessage)
+      const issues = reportIssues(result?.issues)
+      if (successMessage && !issues.some(issue => issue?.type === 'error')) notify(successMessage)
       return result
     } catch (error) {
       notify(error?.message || '操作失败，请重试', 'error')
@@ -77,7 +95,11 @@ export const useAppStore = defineStore('app', () => {
 
   async function initialize () {
     try {
-      if (window.skillsManager) applyState(await api().getState())
+      if (window.skillsManager) {
+        const result = await api().getState()
+        applyState(result)
+        reportIssues(result?.issues)
+      }
       else document.documentElement.classList.remove('dark')
     } catch (error) {
       notify(error.message, 'error')
@@ -88,12 +110,19 @@ export const useAppStore = defineStore('app', () => {
 
   async function setTheme (nextTheme) {
     if (nextTheme !== 'light' && nextTheme !== 'dark') return false
+    const previousTheme = theme.value
     document.documentElement.classList.toggle('dark', nextTheme === 'dark')
     theme.value = nextTheme
     try {
-      if (window.skillsManager) applyState(await api().setTheme(nextTheme))
+      if (window.skillsManager) {
+        const result = await api().setTheme(nextTheme)
+        applyState(result)
+        reportIssues(result?.issues)
+      }
       return true
     } catch (error) {
+      theme.value = previousTheme
+      document.documentElement.classList.toggle('dark', previousTheme === 'dark')
       notify(error.message, 'error')
       return false
     }
@@ -104,9 +133,9 @@ export const useAppStore = defineStore('app', () => {
   }
 
   return {
-    repositoryPath, skills, groups, agents, enabledGroups, theme, ready, busy, notice, dialog, hasRepository,
+    repositoryPath, skills, groups, agents, enabledGroups, theme, ready, busy, notices, dialog, hasRepository,
     initialize, setTheme, toggleTheme, notify, confirm, resolveDialog,
-    dismissNotice: () => { notice.value = null },
+    dismissNotice,
     chooseDirectory: current => api().chooseDirectory(current),
     setRepository: directory => execute(() => api().setRepository(directory), 'Skills 仓库已更新'),
     refreshSkills: () => execute(() => api().refreshSkills(), '已重新扫描 Skills'),
@@ -114,6 +143,6 @@ export const useAppStore = defineStore('app', () => {
     upsertAgent: agent => execute(() => api().upsertAgent(agent), agent.id ? 'Agent 已更新' : 'Agent 已添加'),
     deleteAgent: id => execute(() => api().deleteAgent(id), 'Agent 已删除，相关链接已清理'),
     clearData: () => execute(() => api().clearData(), '本地数据已清除'),
-    setAgentGroups: (agentId, groupIds) => execute(() => api().setAgentGroups(agentId, groupIds))
+    setAgentGroups: (agentId, groupIds) => execute(() => api().setAgentGroups(agentId, groupIds), '链接配置已同步')
   }
 })
