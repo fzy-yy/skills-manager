@@ -2,14 +2,14 @@
   ApplicationsView —— 应用配置页（Agent 与分组的关联关系）。
 
   页面职责：选择目标 Agent，然后逐个开启/关闭分组。
-  每次开关都会立即提交给 preload 服务，由其做差量同步：
+  开关先由 Pinia 乐观更新；短暂防抖后只把最终状态提交给 preload 服务做差量同步：
   - 新开启的分组内的 Skills，会在 Agent 目录下创建指向仓库源目录的链接；
   - 取消开启或被删除的分组，只会移除「本应用创建且仍指向原目标」的受管链接，
     手动创建的文件/目录/链接一律保留并给出提示。
 
   数据流：activeGroups 取自 store.enabledGroups[选中 Agent]，
-  开关状态完全由 store 决定（受控组件），不做本地乐观更新，
-  以保证界面状态与磁盘上的真实链接一致。
+  开关状态完全由 store 决定（受控组件），由 store 负责乐观更新、请求合并和失败回滚，
+  以保证连续操作流畅，同时让界面最终状态与磁盘上的真实链接一致。
 -->
 <script setup>
 // 图标：Bot 表示 Agent，Layers3 表示分组。
@@ -63,7 +63,7 @@ watch(
  * @param {boolean} enabled - 开关的目标状态（true 为开启）
  */
 async function setGroup(groupId, enabled) {
-  // 依据目标状态计算新的启用列表，再整体提交（服务端按差集增删链接）。
+  // 依据目标状态计算新的启用列表；Pinia 会合并连续切换，服务端只处理最终差集。
   const next = enabled
     ? [...activeGroups.value, groupId]
     : activeGroups.value.filter((id) => id !== groupId);
@@ -147,7 +147,7 @@ async function setGroup(groupId, enabled) {
               >{{ group.skillIds.length }} 个 Skills</span
             >
           </div>
-          <!-- 受控开关：状态来自 store，切换时提交差量同步 -->
+          <!-- 受控开关：状态来自 store，连续切换由 store 防抖合并后提交 -->
           <ToggleSwitch
             :model-value="activeGroups.includes(group.id)"
             :disabled="store.busy"

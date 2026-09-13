@@ -158,6 +158,9 @@ function normalizeCachedSkills(input) {
       !relativePath ||
       !folderName ||
       !sourcePath ||
+      folderName !== path.basename(folderName) ||
+      folderName === "." ||
+      folderName === ".." ||
       ids.has(id)
     )
       return [];
@@ -1088,6 +1091,59 @@ async function scanConfiguredRepository(config) {
   }
 }
 
+/**
+ * 为单个 Agent 的开关变更核验实际涉及的缓存 Skills。
+ * 不递归扫描整个仓库；任一源目录不可用时标记为不完整，从而保留已有受管链接并停止危险清理。
+ */
+async function inspectEnabledCachedSkills(config, agent) {
+  const enabledGroupIds = new Set(config.enabledGroups[agent.id] || []);
+  const desiredSkillIds = new Set();
+  config.groups.forEach((group) => {
+    if (enabledGroupIds.has(group.id)) {
+      group.skillIds.forEach((skillId) => desiredSkillIds.add(skillId));
+    }
+  });
+  const cachedById = new Map(
+    normalizeCachedSkills(config._cachedSkills).map((skill) => [
+      skill.id,
+      skill,
+    ]),
+  );
+  const skills = [];
+  const issues = [];
+  let complete = true;
+
+  for (const skillId of desiredSkillIds) {
+    const skill = cachedById.get(skillId);
+    if (!skill) {
+      complete = false;
+      issues.push(
+        createIssue(
+          "warning",
+          `Skill“${skillId}”不在最近一次完整扫描缓存中，已跳过创建。请重新扫描仓库后再试。`,
+        ),
+      );
+      continue;
+    }
+    const insideRepository =
+      config.repositoryPath &&
+      (await isInsideDirectory(config.repositoryPath, skill.sourcePath));
+    if (!insideRepository || !(await hasValidSkillFile(skill.sourcePath))) {
+      complete = false;
+      issues.push(
+        createIssue(
+          "warning",
+          `Skill“${skill.name}”的源目录不可用或已不是有效 Skill，已跳过创建并保留现有链接。`,
+        ),
+      );
+      continue;
+    }
+    skills.push(skill);
+  }
+
+  return { skills, issues: uniqueIssues(issues), complete };
+}
+
 // ============================================================================
 // 四、链接检查与安全删除
 // ============================================================================
@@ -1782,6 +1838,61 @@ function buildState(
 }
 
 /**
+ * 保存同步后的链接状态；保存失败时安全回滚本轮新建链接，并重试记录最终状态。
+ *
+ * @param {object} config - 当前完整配置
+ * @param {object} syncResults - 本轮参与同步的 Agent 结果
+ * @returns {Promise<Array>} 持久化或回滚期间产生的问题
+ */
+async function persistSyncResults(config, syncResults) {
+  const persistenceIssues = [];
+  if (config._syncLocked) return persistenceIssues;
+  try {
+    writeConfig(config);
+  } catch (error) {
+    const rollbackIssues = [];
+    for (const agent of config.agents) {
+      const createdLinks = syncResults[agent.id]?.createdLinks || [];
+      for (const link of createdLinks) {
+        const removal = await removeOwnedLink(
+          link,
+          `保存失败后的新建链接 ${link.linkPath}`,
+          agent.directory,
+        );
+        rollbackIssues.push(...removal.issues);
+        if (removal.relinquished) {
+          delete agent.managedLinks[link.skillId];
+          const syncResult = syncResults[agent.id];
+          syncResult.linked = syncResult.linked.filter(
+            (id) => id !== link.skillId,
+          );
+        }
+      }
+    }
+    try {
+      writeConfig(config);
+      const detail = rollbackIssues.length
+        ? `部分新建链接未能回滚，但其受管记录已保留：${rollbackIssues.map((issue) => issue.message).join("；")}`
+        : "本轮新建链接已回滚，数据库重试保存成功";
+      persistenceIssues.push(
+        createIssue("warning", `${error.message}；${detail}。`),
+      );
+    } catch (retryError) {
+      const detail = rollbackIssues.length
+        ? `；新建链接回滚存在问题：${rollbackIssues.map((issue) => issue.message).join("；")}`
+        : "；本轮新建链接已回滚，其余状态将在下次启动时按安全检查点自动收敛";
+      persistenceIssues.push(
+        createIssue(
+          "error",
+          `${error.message}；重试保存仍失败：${retryError.message}${detail}`,
+        ),
+      );
+    }
+  }
+  return persistenceIssues;
+}
+
+/**
  * 刷新状态的核心流程：扫描仓库 → 写入恢复检查点 → 同步所有 Agent → 保存结果 → 组装状态。
  *
  * 关键点：文件操作前先持久化业务目标与旧链接记录；最终写入失败时回滚本轮新建链接，
@@ -1791,78 +1902,19 @@ function buildState(
  * @returns {object} 前端可用的完整状态
  * @throws {Error} 恢复检查点无法写入时抛出，且不会执行任何文件操作
  */
-async function refreshState(config, targetAgentId = "") {
+async function refreshState(config) {
   const scan = await scanConfiguredRepository(config);
   // 只有完整扫描结果才替换首屏缓存；不完整结果绝不成为后续清理依据。
   if (scan.complete && !scan.locked)
     config._cachedSkills = normalizeCachedSkills(scan.skills);
   const reconciledIssues = reconcileDeletedSkills(config, scan);
-  // 仓库删除导致共享分组内容变化时，需要同步全部 Agent，避免其他目录遗留旧链接。
-  const effectiveTargetAgentId = reconciledIssues.length
-    ? ""
-    : targetAgentId;
   // 只读保护时只观察链接；正常状态先保存恢复检查点，再开始文件系统变更。
   if (!config._syncLocked) writeConfig(config);
   const orphanIssues = config._syncLocked
     ? []
     : await cleanupOrphanAgents(config);
-  // 单个 Agent 的开关变更只同步目标 Agent；其余操作仍执行完整一致性校验。
-  const syncResults = effectiveTargetAgentId
-    ? {
-        [effectiveTargetAgentId]: await syncAgent(
-          config,
-          config.agents.find((agent) => agent.id === effectiveTargetAgentId),
-          scan,
-        ),
-      }
-    : await syncAllAgents(config, scan);
-  const persistenceIssues = [];
-  if (!config._syncLocked) {
-    try {
-      writeConfig(config);
-    } catch (error) {
-      // 检查点已包含业务目标和旧链接记录；这里只回滚未持久化的新链接，删除项可在下次启动自愈。
-      const rollbackIssues = [];
-      for (const agent of config.agents) {
-        const createdLinks = syncResults[agent.id]?.createdLinks || [];
-        for (const link of createdLinks) {
-          const removal = await removeOwnedLink(
-            link,
-            `保存失败后的新建链接 ${link.linkPath}`,
-            agent.directory,
-          );
-          rollbackIssues.push(...removal.issues);
-          if (removal.relinquished) {
-            delete agent.managedLinks[link.skillId];
-            const syncResult = syncResults[agent.id];
-            syncResult.linked = syncResult.linked.filter(
-              (id) => id !== link.skillId,
-            );
-          }
-        }
-      }
-      // 回滚后再尝试一次最终保存；成功则数据库与当前磁盘已经重新一致。
-      try {
-        writeConfig(config);
-        const detail = rollbackIssues.length
-          ? `部分新建链接未能回滚，但其受管记录已保留：${rollbackIssues.map((issue) => issue.message).join("；")}`
-          : "本轮新建链接已回滚，数据库重试保存成功";
-        persistenceIssues.push(
-          createIssue("warning", `${error.message}；${detail}。`),
-        );
-      } catch (retryError) {
-        const detail = rollbackIssues.length
-          ? `；新建链接回滚存在问题：${rollbackIssues.map((issue) => issue.message).join("；")}`
-          : "；本轮新建链接已回滚，其余状态将在下次启动时按安全检查点自动收敛";
-        persistenceIssues.push(
-          createIssue(
-            "error",
-            `${error.message}；重试保存仍失败：${retryError.message}${detail}`,
-          ),
-        );
-      }
-    }
-  }
+  const syncResults = await syncAllAgents(config, scan);
+  const persistenceIssues = await persistSyncResults(config, syncResults);
   return buildState(
     config,
     scan,
@@ -1871,6 +1923,29 @@ async function refreshState(config, targetAgentId = "") {
       ...(config._issues || []),
       ...reconciledIssues,
       ...orphanIssues,
+      ...persistenceIssues,
+    ]),
+  );
+}
+
+/**
+ * 只同步一次应用配置开关涉及的 Agent。
+ * 使用最近一次完整扫描缓存并逐项验证源目录，避免每次点击都递归遍历整个仓库。
+ */
+async function syncAgentGroupsState(config, agent) {
+  const targetedScan = await inspectEnabledCachedSkills(config, agent);
+  // 先保存新的启用关系和旧链接记录；检查点失败时不会触碰文件系统。
+  writeConfig(config);
+  const syncResults = {
+    [agent.id]: await syncAgent(config, agent, targetedScan),
+  };
+  const persistenceIssues = await persistSyncResults(config, syncResults);
+  return buildState(
+    config,
+    { skills: config._cachedSkills || [] },
+    syncResults,
+    collectIssues(targetedScan, syncResults, [
+      ...(config._issues || []),
       ...persistenceIssues,
     ]),
   );
@@ -2226,6 +2301,6 @@ window.skillsManager = {
     config.enabledGroups[agentId] = [
       ...new Set(Array.isArray(groupIds) ? groupIds.map(String) : []),
     ].filter((groupId) => validIds.has(groupId));
-    return refreshState(config, agentId);
+    return syncAgentGroupsState(config, agent);
   },
 };

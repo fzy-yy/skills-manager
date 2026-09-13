@@ -54,6 +54,11 @@ export const useAppStore = defineStore("app", () => {
   let dialogResolver;
   // 文件与数据库操作必须串行，避免快速重复点击产生两轮相互覆盖的链接同步。
   let operationInFlight = false;
+  // 应用配置开关使用短防抖合并；快速开关回到原状态时不会触碰数据库或链接。
+  const pendingGroupSyncs = new Map();
+  let groupSyncTimer;
+  let groupSyncFlushing = false;
+  const GROUP_SYNC_DEBOUNCE_MS = 300;
 
   // ---------- 派生状态 ----------
   // 是否已经配置过统一 Skills 仓库目录。
@@ -95,8 +100,14 @@ export const useAppStore = defineStore("app", () => {
       groups.value = Array.isArray(next.groups) ? next.groups : [];
     if (Object.hasOwn(next, "agents"))
       agents.value = Array.isArray(next.agents) ? next.agents : [];
-    if (Object.hasOwn(next, "enabledGroups"))
-      enabledGroups.value = next.enabledGroups || {};
+    if (Object.hasOwn(next, "enabledGroups")) {
+      const mergedEnabledGroups = { ...(next.enabledGroups || {}) };
+      // 服务端状态回写时保留尚在防抖窗口内的乐观选择，避免开关视觉回跳。
+      pendingGroupSyncs.forEach((pending, agentId) => {
+        mergedEnabledGroups[agentId] = [...pending.groupIds];
+      });
+      enabledGroups.value = mergedEnabledGroups;
+    }
     if (Object.hasOwn(next, "theme"))
       theme.value = next.theme === "dark" ? "dark" : "light";
     // 主题以 <html class="dark"> 为开关，与 src/main.css 中的 .dark 令牌对应。
@@ -196,6 +207,111 @@ export const useAppStore = defineStore("app", () => {
       operationInFlight = false;
       busy.value = false;
     }
+  }
+
+  // ---------- 应用配置开关合并 ----------
+  /** 规范化分组 id 数组，便于比较最终选择是否真正发生变化。 */
+  function normalizeGroupIds(groupIds) {
+    return [
+      ...new Set(Array.isArray(groupIds) ? groupIds.map(String) : []),
+    ].sort();
+  }
+
+  /** 判断两个分组选择是否等价。 */
+  function groupIdsEqual(left, right) {
+    const normalizedLeft = normalizeGroupIds(left);
+    const normalizedRight = normalizeGroupIds(right);
+    return (
+      normalizedLeft.length === normalizedRight.length &&
+      normalizedLeft.every((id, index) => id === normalizedRight[index])
+    );
+  }
+
+  /** 安排下一次防抖提交；其他业务操作进行中时稍后自动重试。 */
+  function scheduleGroupSync(delay = GROUP_SYNC_DEBOUNCE_MS) {
+    clearTimeout(groupSyncTimer);
+    groupSyncTimer = setTimeout(() => {
+      groupSyncTimer = undefined;
+      void flushPendingGroupSyncs();
+    }, delay);
+  }
+
+  /** 顺序提交各 Agent 的最终分组状态，确保不会与其他文件操作并发。 */
+  async function flushPendingGroupSyncs() {
+    if (!pendingGroupSyncs.size) return;
+    if (groupSyncFlushing || operationInFlight) {
+      scheduleGroupSync(100);
+      return;
+    }
+    const [agentId, pending] = pendingGroupSyncs.entries().next().value;
+    pendingGroupSyncs.delete(agentId);
+    groupSyncFlushing = true;
+    try {
+      const result = await execute(
+        () => api().setAgentGroups(agentId, pending.groupIds),
+        "链接配置已同步",
+      );
+      pending.waiters.forEach(({ resolve }) => resolve(result));
+    } catch (error) {
+      // 没有更新的同 Agent 请求时才回滚乐观状态，避免覆盖用户刚做出的新选择。
+      if (!pendingGroupSyncs.has(agentId)) {
+        enabledGroups.value = {
+          ...enabledGroups.value,
+          [agentId]: [...pending.baseGroupIds],
+        };
+      }
+      pending.waiters.forEach(({ reject }) => reject(error));
+    } finally {
+      groupSyncFlushing = false;
+      if (pendingGroupSyncs.size) scheduleGroupSync(0);
+    }
+  }
+
+  /**
+   * 乐观更新开关，并把防抖窗口内的多次切换合并成一次最终提交。
+   * 若最终选择回到提交前状态，则直接完成等待，不调用 preload。
+   */
+  function setAgentGroupsDebounced(agentId, groupIds) {
+    const normalizedIds = normalizeGroupIds(groupIds);
+    let pending = pendingGroupSyncs.get(agentId);
+    if (!pending) {
+      pending = {
+        baseGroupIds: normalizeGroupIds(enabledGroups.value[agentId]),
+        groupIds: normalizedIds,
+        waiters: [],
+      };
+      pendingGroupSyncs.set(agentId, pending);
+    } else pending.groupIds = normalizedIds;
+
+    enabledGroups.value = {
+      ...enabledGroups.value,
+      [agentId]: [...normalizedIds],
+    };
+
+    const completion = new Promise((resolve, reject) => {
+      pending.waiters.push({ resolve, reject });
+    });
+    if (groupIdsEqual(pending.baseGroupIds, normalizedIds)) {
+      pendingGroupSyncs.delete(agentId);
+      pending.waiters.forEach(({ resolve }) => resolve(null));
+      if (!pendingGroupSyncs.size) clearTimeout(groupSyncTimer);
+      else scheduleGroupSync();
+    } else scheduleGroupSync();
+    return completion;
+  }
+
+  /** 取消指定 Agent 尚未落库的开关请求，用于删除 Agent 前收敛前端状态。 */
+  function cancelPendingAgentGroups(agentId) {
+    const pending = pendingGroupSyncs.get(agentId);
+    if (!pending) return;
+    pendingGroupSyncs.delete(agentId);
+    pending.waiters.forEach(({ resolve }) => resolve(null));
+    if (!pendingGroupSyncs.size) clearTimeout(groupSyncTimer);
+  }
+
+  /** 清除所有尚未落库的开关请求，避免清除数据后又被延迟任务恢复。 */
+  function cancelAllPendingAgentGroups() {
+    [...pendingGroupSyncs.keys()].forEach(cancelPendingAgentGroups);
   }
 
   // ---------- 确认对话框 ----------
@@ -349,12 +465,19 @@ export const useAppStore = defineStore("app", () => {
         agent.id ? "Agent 已更新" : "Agent 已添加",
       ),
     // 删除 Agent，同时清理本应用在其目录创建的链接。
-    deleteAgent: (id) =>
-      execute(() => api().deleteAgent(id), "Agent 已删除，相关链接已清理"),
+    deleteAgent: (id) => {
+      cancelPendingAgentGroups(id);
+      return execute(
+        () => api().deleteAgent(id),
+        "Agent 已删除，相关链接已清理",
+      );
+    },
     // 清除 uTools 本地数据库配置（保留仓库中的源文件）。
-    clearData: () => execute(() => api().clearData(), "本地数据已清除"),
+    clearData: () => {
+      cancelAllPendingAgentGroups();
+      return execute(() => api().clearData(), "本地数据已清除");
+    },
     // 设置某个 Agent 启用的分组，服务端据此差量创建/移除链接。
-    setAgentGroups: (agentId, groupIds) =>
-      execute(() => api().setAgentGroups(agentId, groupIds), "链接配置已同步"),
+    setAgentGroups: setAgentGroupsDebounced,
   };
 });
