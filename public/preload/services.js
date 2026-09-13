@@ -19,6 +19,8 @@
 
 // Node.js 文件系统模块：读取 SKILL.md、创建/删除链接、遍历目录。
 const fs = require("node:fs");
+// Promise 版本的文件系统 API 会把 I/O 交给 Node.js 线程池，避免阻塞 uTools 渲染线程。
+const fsp = fs.promises;
 // Node.js 路径模块：跨平台地拼接、解析路径并计算相对路径。
 const path = require("node:path");
 
@@ -26,6 +28,14 @@ const path = require("node:path");
 const CONFIG_VERSION = 2;
 // 所有同步配置集中在一个文档内，dbStorage.setItem 单次写入不会出现半份新、半份旧的配置。
 const STATE_KEY = "skills-manager/state-v2";
+// 单次只读文件操作的最长等待时间；超时只中止本轮业务，不执行危险清理。
+const FILE_READ_TIMEOUT_MS = 15_000;
+// 扫描边界：防止误选磁盘根目录或超大目录后无限遍历，数值足以覆盖正常 Skills 仓库。
+const MAX_SCAN_DIRECTORIES = 20_000;
+const MAX_SCAN_DEPTH = 64;
+const MAX_SCAN_DURATION_MS = 30_000;
+const MAX_SCAN_ISSUES = 50;
+const MAX_SKILL_FILE_BYTES = 2 * 1024 * 1024;
 // 仅用于把当前开发阶段已经产生的 v1 数据迁移到单文档结构，不涉及旧 JSON 文件。
 const LEGACY_STORAGE_KEYS = Object.freeze({
   version: "skills-manager/version",
@@ -97,6 +107,62 @@ function uniqueIssues(issues) {
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
+  });
+}
+
+/**
+ * 为只读文件系统操作增加超时保护。
+ * Node.js 16 无法取消所有底层目录调用，但超时后业务流程会立即恢复，且不会继续执行删除操作。
+ *
+ * @template T
+ * @param {Promise<T>} operation - 文件系统 Promise
+ * @param {string} label - 超时时显示的操作名称
+ * @returns {Promise<T>}
+ */
+function withReadTimeout(operation, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label}超时（${FILE_READ_TIMEOUT_MS / 1000} 秒）`);
+      error.code = "ETIMEDOUT";
+      reject(error);
+    }, FILE_READ_TIMEOUT_MS);
+  });
+  return Promise.race([operation, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** 判断路径是否存在；访问失败统一按不存在处理，由上层按只读保护规则决定后续动作。 */
+async function pathExists(target) {
+  try {
+    await withReadTimeout(fsp.access(target), `访问路径 ${target}`);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+/** 规范化缓存的 Skill 扫描结果，缓存仅用于首屏展示，不参与未校验的删除决策。 */
+function normalizeCachedSkills(input) {
+  if (!Array.isArray(input)) return [];
+  const ids = new Set();
+  return input.flatMap((item) => {
+    if (!isPlainObject(item)) return [];
+    const id = String(item.id || "").trim();
+    const name = String(item.name || "").trim();
+    const relativePath = String(item.relativePath || "").trim();
+    const folderName = String(item.folderName || "").trim();
+    const sourcePath = String(item.sourcePath || "").trim();
+    if (
+      !id ||
+      !name ||
+      !relativePath ||
+      !folderName ||
+      !sourcePath ||
+      ids.has(id)
+    )
+      return [];
+    ids.add(id);
+    return [{ id, name, relativePath, folderName, sourcePath }];
   });
 }
 
@@ -185,6 +251,12 @@ function normalizeConfig(input) {
       name,
       directory,
       managedLinks: normalizeManagedLinks(item.managedLinks),
+      // 外部同源链接不受本应用管理，仅缓存最近一次核验数量用于首屏统计。
+      externalLinkedCount:
+        Number.isInteger(item.externalLinkedCount) &&
+        item.externalLinkedCount >= 0
+          ? item.externalLinkedCount
+          : 0,
     });
   }
 
@@ -264,7 +336,7 @@ function attachRuntime(config, context) {
  * 深度校验同步配置与本机链接状态。任何可能改变链接集合的嵌套异常都会进入只读保护，
  * 绝不再把损坏的数组静默当成空数组执行删除。
  */
-function validateStoredState(stored, deviceState, legacy = false) {
+async function validateStoredState(stored, deviceState, legacy = false) {
   const issues = [];
   let locked = false;
   const fail = (message) => {
@@ -377,16 +449,18 @@ function validateStoredState(stored, deviceState, legacy = false) {
       if (
         typeof localAgent?.directory === "string" &&
         localAgent.directory.trim()
-      ) {
-        if (
-          localDirectories.some((directory) =>
-            pathsEqual(directory, localAgent.directory),
-          )
-        )
-          fail(`多个本机 Agent 指向同一个 Skills 目录：${localAgent.directory}`);
-        else localDirectories.push(localAgent.directory);
-      }
+      )
+        localDirectories.push(localAgent.directory);
     });
+    // 路径别名需要解析真实目录后比较，因此使用异步循环，避免 realpath 阻塞界面。
+    for (let index = 0; index < localDirectories.length; index += 1) {
+      for (let other = 0; other < index; other += 1) {
+        if (await pathsEqual(localDirectories[index], localDirectories[other])) {
+          fail(`多个本机 Agent 指向同一个 Skills 目录：${localDirectories[index]}`);
+          break;
+        }
+      }
+    }
   }
 
   if (stored?.theme !== "light" && stored?.theme !== "dark") {
@@ -420,12 +494,15 @@ function buildStoredState(
       name: agent.name,
       directory: agent.directory,
       managedLinks: normalizeManagedLinks(agent.managedLinks),
+      externalLinkedCount: agent.externalLinkedCount || 0,
     };
   });
   if (Object.keys(localAgents).length || normalized.repositoryPath) {
     deviceStates[deviceId] = {
       repositoryPath: normalized.repositoryPath,
       agents: localAgents,
+      // 扫描缓存只用于当前设备首屏展示；实际同步前始终重新扫描校验。
+      skills: normalizeCachedSkills(config._cachedSkills),
     };
   } else delete deviceStates[deviceId];
 
@@ -462,7 +539,7 @@ function writeConfig(config) {
 }
 
 /** 读取单文档配置，并把当前设备的路径与链接记录合并到内存 Agent。 */
-function readConfig() {
+async function readConfig() {
   try {
     const storage = database();
     const deviceId = nativeId();
@@ -479,6 +556,7 @@ function readConfig() {
         _deviceId: deviceId,
         _deviceStates: {},
         _orphanAgents: [],
+        _cachedSkills: [],
         _storedState: null,
         _legacy: false,
       });
@@ -506,7 +584,7 @@ function readConfig() {
       };
     }
 
-    const validation = validateStoredState(stored, deviceState, legacy);
+    const validation = await validateStoredState(stored, deviceState, legacy);
     const localAgentRecords = isPlainObject(deviceState.agents)
       ? deviceState.agents
       : {};
@@ -522,6 +600,7 @@ function readConfig() {
                 ? agent.directory
                 : "",
           managedLinks: local?.managedLinks || agent.managedLinks || {},
+          externalLinkedCount: local?.externalLinkedCount || 0,
         };
       },
     );
@@ -558,6 +637,7 @@ function readConfig() {
       _deviceId: deviceId,
       _deviceStates: deviceStates,
       _orphanAgents: orphanAgents,
+      _cachedSkills: normalizeCachedSkills(deviceState.skills),
       _storedState: stored,
       _legacy: legacy,
     });
@@ -599,13 +679,13 @@ function clearStoredConfig(config) {
  * @returns {string} 规范化后的绝对路径
  * @throws {Error} 路径为空、不存在、无权限或不是文件夹
  */
-function normalizeDirectory(directory, label = "目录") {
+async function normalizeDirectory(directory, label = "目录") {
   if (typeof directory !== "string" || !directory.trim())
     throw new Error(`请选择有效的${label}`);
   const resolved = path.resolve(directory.trim());
   let stat;
   try {
-    stat = fs.statSync(resolved);
+    stat = await withReadTimeout(fsp.stat(resolved), `检查${label}`);
   } catch (error) {
     throw new Error(`${label}不存在或无法访问：${errorMessage(error)}`);
   }
@@ -637,15 +717,23 @@ function comparablePath(target) {
  * @param {string} right - 路径 B
  * @returns {boolean} 是否指向同一位置
  */
-function pathsEqual(left, right) {
+async function pathsEqual(left, right) {
   try {
     if (comparablePath(left) === comparablePath(right)) return true;
     // 两侧都存在时才解析真实路径，避免对不存在的路径抛异常。
-    if (fs.existsSync(left) && fs.existsSync(right))
+    const [leftExists, rightExists] = await Promise.all([
+      pathExists(left),
+      pathExists(right),
+    ]);
+    if (leftExists && rightExists) {
+      const [leftRealPath, rightRealPath] = await Promise.all([
+        withReadTimeout(fsp.realpath(left), `解析路径 ${left}`),
+        withReadTimeout(fsp.realpath(right), `解析路径 ${right}`),
+      ]);
       return (
-        comparablePath(fs.realpathSync(left)) ===
-        comparablePath(fs.realpathSync(right))
+        comparablePath(leftRealPath) === comparablePath(rightRealPath)
       );
+    }
   } catch (_) {}
   return false;
 }
@@ -658,15 +746,19 @@ function pathsEqual(left, right) {
  * @param {string} child - 待判断的目录
  * @returns {boolean} child 是否在 parent 内部
  */
-function isInsideDirectory(parent, child) {
-  const canonical = (target) => {
+async function isInsideDirectory(parent, child) {
+  const canonical = async (target) => {
     try {
-      return fs.realpathSync(target);
+      return await withReadTimeout(fsp.realpath(target), `解析路径 ${target}`);
     } catch (_) {
       return path.resolve(target);
     }
   };
-  const relative = path.relative(canonical(parent), canonical(child));
+  const [canonicalParent, canonicalChild] = await Promise.all([
+    canonical(parent),
+    canonical(child),
+  ]);
+  const relative = path.relative(canonicalParent, canonicalChild);
   // 相对路径为空表示同一目录；以 .. 开头或为绝对路径则表示不在内部。
   return (
     relative === "" ||
@@ -683,38 +775,51 @@ function isInsideDirectory(parent, child) {
  * @param {string} [currentAgentId=''] - 正在编辑的 Agent id（校验重复时排除自身）
  * @throws {Error} 目录不满足约束时抛出带原因的异常
  */
-function assertSafeAgentDirectory(config, directory, currentAgentId = "") {
+async function assertSafeAgentDirectory(
+  config,
+  directory,
+  currentAgentId = "",
+) {
   let canonicalDirectory = directory;
   // 优先使用 realpath，保证符号链接形式的根目录也能被识别。
   try {
-    canonicalDirectory = fs.realpathSync(directory);
+    canonicalDirectory = await withReadTimeout(
+      fsp.realpath(directory),
+      `解析 Agent Skills 目录 ${directory}`,
+    );
   } catch (_) {}
   if (path.parse(canonicalDirectory).root === canonicalDirectory)
     throw new Error("Agent Skills 目录不能是磁盘根目录");
   // 与仓库目录互相包含会导致「扫描结果里出现自己创建的链接」，形成递归干扰。
   if (
     config.repositoryPath &&
-    (isInsideDirectory(config.repositoryPath, directory) ||
-      isInsideDirectory(directory, config.repositoryPath))
+    ((await isInsideDirectory(config.repositoryPath, directory)) ||
+      (await isInsideDirectory(directory, config.repositoryPath)))
   ) {
     throw new Error(
       "Agent Skills 目录不能与统一 Skills 仓库相同或互相包含，以免扫描和链接相互影响",
     );
   }
   // 同一目录被两个 Agent 使用会导致链接被互相删除，必须禁止。
-  const duplicate = config.agents.find(
-    (agent) =>
-      agent.id !== currentAgentId &&
-      agent.directory &&
-      pathsEqual(agent.directory, directory),
-  );
+  let duplicate;
+  for (const agent of config.agents) {
+    if (agent.id === currentAgentId || !agent.directory) continue;
+    if (await pathsEqual(agent.directory, directory)) {
+      duplicate = agent;
+      break;
+    }
+  }
   if (duplicate)
     throw new Error(
       `该 Skills 目录已由 Agent“${duplicate.name}”使用，请选择其他目录`,
     );
-  const pendingCleanup = (config._orphanAgents || []).find(
-    (agent) => agent.directory && pathsEqual(agent.directory, directory),
-  );
+  let pendingCleanup;
+  for (const agent of config._orphanAgents || []) {
+    if (agent.directory && (await pathsEqual(agent.directory, directory))) {
+      pendingCleanup = agent;
+      break;
+    }
+  }
   if (pendingCleanup)
     throw new Error(
       `该目录仍有 Agent“${pendingCleanup.name}”的受管链接等待清理，请处理相关错误后刷新再试`,
@@ -732,10 +837,24 @@ function assertSafeAgentDirectory(config, directory, currentAgentId = "") {
  * @param {string} skillFile - SKILL.md 的绝对路径
  * @returns {{name: string, error: string, incomplete?: boolean}} incomplete 表示文件暂时无法读取，不能据此清理 Skill
  */
-function readSkillNameDetailed(skillFile) {
+async function readSkillNameDetailed(skillFile) {
   let content;
   try {
-    content = fs.readFileSync(skillFile, "utf8");
+    const stat = await withReadTimeout(
+      fsp.stat(skillFile),
+      `检查 Skill 文件 ${skillFile}`,
+    );
+    if (stat.size > MAX_SKILL_FILE_BYTES) {
+      return {
+        name: "",
+        error: `${skillFile} 超过 ${MAX_SKILL_FILE_BYTES / 1024 / 1024} MB，已拒绝读取`,
+        incomplete: true,
+      };
+    }
+    content = await withReadTimeout(
+      fsp.readFile(skillFile, "utf8"),
+      `读取 Skill 文件 ${skillFile}`,
+    );
   } catch (error) {
     return {
       name: "",
@@ -796,33 +915,62 @@ function readSkillNameDetailed(skillFile) {
  * @returns {{skills: Array, issues: Array, complete: boolean}} 扫描结果、问题列表与扫描是否完整
  */
 // 扫描会记录每个可见错误；只要任一子目录不可读，complete 就为 false。
-function scanSkills(repositoryPath) {
+async function scanSkills(repositoryPath) {
   // 未配置仓库时视为空仓库，无需报错。
   if (!repositoryPath) return { skills: [], issues: [], complete: true };
-  const root = normalizeDirectory(repositoryPath, "Skills 仓库目录");
+  const root = await normalizeDirectory(repositoryPath, "Skills 仓库目录");
   const skills = [];
   const issues = [];
   let complete = true;
+  let omittedIssueCount = 0;
+  let visitedDirectoryCount = 0;
+  const scanStartedAt = Date.now();
+  // 显式栈避免递归调用栈溢出，并为深度与目录数量提供清晰边界。
+  const pendingDirectories = [{ directory: root, depth: 0 }];
+  const pushIssue = (issue) => {
+    if (issues.length < MAX_SCAN_ISSUES) issues.push(issue);
+    else omittedIssueCount += 1;
+  };
 
-  /**
-   * 深度优先遍历单个目录。
-   *
-   * @param {string} directory - 当前目录绝对路径
-   */
-  function visit(directory) {
+  while (pendingDirectories.length) {
+    if (Date.now() - scanStartedAt > MAX_SCAN_DURATION_MS) {
+      complete = false;
+      pushIssue(
+        createIssue(
+          "error",
+          `仓库扫描超过 ${MAX_SCAN_DURATION_MS / 1000} 秒，已停止扫描。请检查目录范围、磁盘或网络连接。`,
+        ),
+      );
+      break;
+    }
+    const { directory, depth } = pendingDirectories.pop();
+    visitedDirectoryCount += 1;
+    if (visitedDirectoryCount > MAX_SCAN_DIRECTORIES) {
+      complete = false;
+      pushIssue(
+        createIssue(
+          "error",
+          `仓库目录超过 ${MAX_SCAN_DIRECTORIES} 个子目录，已停止扫描。请只选择专用的 Skills 仓库目录。`,
+        ),
+      );
+      break;
+    }
     let entries;
     try {
-      entries = fs.readdirSync(directory, { withFileTypes: true });
+      entries = await withReadTimeout(
+        fsp.readdir(directory, { withFileTypes: true }),
+        `扫描目录 ${directory}`,
+      );
     } catch (error) {
       // 目录不可读：标记扫描不完整，后续不会清理任何缺失记录，避免误删。
       complete = false;
-      issues.push(
+      pushIssue(
         createIssue(
           "error",
           `无法扫描目录 ${directory}：${errorMessage(error)}。为防止误删，本次不会清理缺失项。`,
         ),
       );
-      return;
+      continue;
     }
     // 当前目录内存在 SKILL.md → 认定为一个 Skill 目录。
     const skillEntry = entries.find(
@@ -830,7 +978,7 @@ function scanSkills(repositoryPath) {
     );
     if (skillEntry) {
       const skillFile = path.join(directory, skillEntry.name);
-      const result = readSkillNameDetailed(skillFile);
+      const result = await readSkillNameDetailed(skillFile);
       if (result.name) {
         // id 使用相对于仓库根目录的 POSIX 风格路径（根目录自身记为 '.'），便于跨平台存储与比较。
         const relativePath =
@@ -842,12 +990,12 @@ function scanSkills(repositoryPath) {
           folderName: path.basename(directory),
           sourcePath: directory,
         });
-        return;
+        continue;
       }
       // 文件系统读取失败与元数据格式错误语义不同：前者不能证明 Skill 已被删除。
       if (result.incomplete) complete = false;
       // 有 SKILL.md 但元数据非法：忽略该目录并提示，继续向下查找子目录。
-      issues.push(
+      pushIssue(
         createIssue(
           result.incomplete ? "error" : "warning",
           `${result.error}，该目录已忽略。${result.incomplete ? "为防止误删，本次不会清理缺失项。" : ""}`,
@@ -855,19 +1003,40 @@ function scanSkills(repositoryPath) {
       );
     }
     // 继续遍历子目录：跳过符号链接（防止循环）、node_modules 与 .git*。
-    for (const entry of entries) {
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      const lowerName = entry.name.toLowerCase();
       if (
         !entry.isDirectory() ||
         entry.isSymbolicLink() ||
-        entry.name === "node_modules" ||
-        entry.name.startsWith(".git")
+        lowerName === "node_modules" ||
+        lowerName.startsWith(".git")
       )
         continue;
-      visit(path.join(directory, entry.name));
+      if (depth >= MAX_SCAN_DEPTH) {
+        complete = false;
+        pushIssue(
+          createIssue(
+            "error",
+            `目录层级超过 ${MAX_SCAN_DEPTH} 层，已跳过 ${path.join(directory, entry.name)}。`,
+          ),
+        );
+        continue;
+      }
+      pendingDirectories.push({
+        directory: path.join(directory, entry.name),
+        depth: depth + 1,
+      });
     }
   }
-
-  visit(root);
+  if (omittedIssueCount) {
+    issues.push(
+      createIssue(
+        "warning",
+        `另有 ${omittedIssueCount} 条扫描问题未逐条展示，请检查仓库目录权限与结构。`,
+      ),
+    );
+  }
   // 名称统一按中文习惯排序，保证列表展示稳定。
   skills.sort((left, right) => left.name.localeCompare(right.name, "zh-CN"));
   return { skills, issues: uniqueIssues(issues), complete };
@@ -879,7 +1048,7 @@ function scanSkills(repositoryPath) {
  * @param {object} config - 当前配置（可能带 _syncLocked 标记）
  * @returns {{skills: Array, issues: Array, complete: boolean, locked?: boolean}} 扫描结果
  */
-function scanConfiguredRepository(config) {
+async function scanConfiguredRepository(config) {
   // 是否存在依赖仓库路径的数据（分组内容或受管链接）。
   const hasDependentData =
     config.groups.some((group) => group.skillIds.length) ||
@@ -899,7 +1068,7 @@ function scanConfiguredRepository(config) {
     };
   }
   try {
-    const scan = scanSkills(config.repositoryPath);
+    const scan = await scanSkills(config.repositoryPath);
     // 配置本身处于只读保护时，把标记继续向下传递。
     if (config._syncLocked) scan.locked = true;
     return scan;
@@ -932,10 +1101,10 @@ function scanConfiguredRepository(config) {
  *          kind 说明：missing 不存在；directory/file 是普通目录/文件（非链接）；
  *          link 是符号链接（附带目标、是否同源、是否失效、文件标识）；error 检查失败
  */
-function inspectLink(linkPath, expectedSource) {
+async function inspectLink(linkPath, expectedSource) {
   let stat;
   try {
-    stat = fs.lstatSync(linkPath);
+    stat = await withReadTimeout(fsp.lstat(linkPath), `检查链接 ${linkPath}`);
   } catch (error) {
     // 路径不存在属于正常情况（尚未创建链接）。
     if (error.code === "ENOENT") return { kind: "missing" };
@@ -945,7 +1114,10 @@ function inspectLink(linkPath, expectedSource) {
   if (!stat.isSymbolicLink())
     return { kind: stat.isDirectory() ? "directory" : "file" };
   try {
-    const rawTarget = fs.readlinkSync(linkPath);
+    const rawTarget = await withReadTimeout(
+      fsp.readlink(linkPath),
+      `读取链接 ${linkPath}`,
+    );
     // 相对目标的链接需要基于链接所在目录解析成绝对路径。
     const targetPath = path.isAbsolute(rawTarget)
       ? rawTarget
@@ -955,10 +1127,10 @@ function inspectLink(linkPath, expectedSource) {
       targetPath,
       // 目标是否与期望的仓库源目录一致（不一致说明链接已被外部改写）。
       sameTarget: expectedSource
-        ? pathsEqual(targetPath, expectedSource)
+        ? await pathsEqual(targetPath, expectedSource)
         : false,
       // 目标不存在说明该链接已失效。
-      dangling: !fs.existsSync(targetPath),
+      dangling: !(await pathExists(targetPath)),
       // 文件标识：用于确认链接未被「删除后重建」。
       identity: {
         dev: Number(stat.dev),
@@ -997,7 +1169,7 @@ function identitiesEqual(stored, current) {
  * @param {string} child - 待判断路径
  * @returns {boolean} 是否为直接子项
  */
-function isDirectChild(parent, child) {
+async function isDirectChild(parent, child) {
   return pathsEqual(path.dirname(child), parent);
 }
 
@@ -1013,12 +1185,15 @@ function isDirectChild(parent, child) {
  * @returns {{removed: boolean, relinquished: boolean, issues: Array}} removed 是否已删除；
  *          relinquished 是否已放弃管理（为 false 时调用方应保留该记录以便下次重试）
  */
-function removeOwnedLink(link, label, allowedDirectory) {
+async function removeOwnedLink(link, label, allowedDirectory) {
   // 记录不完整视作放弃管理，不做任何文件操作。
   if (!link?.linkPath || !link?.sourcePath)
     return { removed: false, relinquished: true, issues: [] };
   // 路径不在允许目录内：仅提示，绝不删除。
-  if (allowedDirectory && !isDirectChild(allowedDirectory, link.linkPath)) {
+  if (
+    allowedDirectory &&
+    !(await isDirectChild(allowedDirectory, link.linkPath))
+  ) {
     return {
       removed: false,
       relinquished: true,
@@ -1030,7 +1205,7 @@ function removeOwnedLink(link, label, allowedDirectory) {
       ],
     };
   }
-  const inspected = inspectLink(link.linkPath, link.sourcePath);
+  const inspected = await inspectLink(link.linkPath, link.sourcePath);
   // 已经不存在：视为管理结束，无需提示。
   if (inspected.kind === "missing")
     return { removed: false, relinquished: true, issues: [] };
@@ -1066,7 +1241,7 @@ function removeOwnedLink(link, label, allowedDirectory) {
   }
   try {
     // 仅删除链接本身，不会影响链接指向的源目录内容。
-    fs.unlinkSync(link.linkPath);
+    await fsp.unlink(link.linkPath);
     return { removed: true, relinquished: true, issues: [] };
   } catch (error) {
     // 删除失败（如被占用）：保留记录，返回可重试状态。
@@ -1107,14 +1282,18 @@ function describeConflict(skill, linkPath, inspected) {
  * @param {string} directory - 待检查目录
  * @returns {boolean} 是否为有效 Skill 目录
  */
-function hasValidSkillFile(directory) {
+async function hasValidSkillFile(directory) {
   try {
-    const files = fs.readdirSync(directory, { withFileTypes: true });
+    const files = await withReadTimeout(
+      fsp.readdir(directory, { withFileTypes: true }),
+      `检查 Skill 目录 ${directory}`,
+    );
     const entry = files.find(
       (item) => item.isFile() && item.name.toLowerCase() === "skill.md",
     );
     return Boolean(
-      entry && readSkillNameDetailed(path.join(directory, entry.name)).name,
+      entry &&
+        (await readSkillNameDetailed(path.join(directory, entry.name))).name,
     );
   } catch (_) {
     // 目录不存在或不可读，按无效处理（只影响提示，不影响文件）。
@@ -1130,11 +1309,14 @@ function hasValidSkillFile(directory) {
  * @param {Set<string>} knownPaths - 本应用已知的链接路径（comparablePath 形式）
  * @returns {Array} 问题列表
  */
-function auditUnmanagedLinks(agent, knownPaths) {
+async function auditUnmanagedLinks(agent, knownPaths) {
   const issues = [];
   let entries;
   try {
-    entries = fs.readdirSync(agent.directory, { withFileTypes: true });
+    entries = await withReadTimeout(
+      fsp.readdir(agent.directory, { withFileTypes: true }),
+      `检查 Agent“${agent.name}”目录`,
+    );
   } catch (error) {
     return [
       createIssue(
@@ -1143,27 +1325,25 @@ function auditUnmanagedLinks(agent, knownPaths) {
       ),
     ];
   }
-  entries
-    .filter((entry) => entry.isSymbolicLink())
-    .forEach((entry) => {
-      const linkPath = path.join(agent.directory, entry.name);
-      // 本应用管理的链接已单独处理，这里只关心外部链接。
-      if (knownPaths.has(comparablePath(linkPath))) return;
-      const inspected = inspectLink(linkPath);
-      // 失效链接或目标不是有效 Skill 的链接，提示用户但不做处理。
-      if (
-        inspected.kind !== "link" ||
-        inspected.dangling ||
-        !hasValidSkillFile(inspected.targetPath)
-      ) {
-        issues.push(
-          createIssue(
-            "warning",
-            `Agent“${agent.name}”中发现非 Skill 或失效的手动链接 ${linkPath}，已忽略并保留。`,
-          ),
-        );
-      }
-    });
+  for (const entry of entries.filter((item) => item.isSymbolicLink())) {
+    const linkPath = path.join(agent.directory, entry.name);
+    // 本应用管理的链接已单独处理，这里只关心外部链接。
+    if (knownPaths.has(comparablePath(linkPath))) continue;
+    const inspected = await inspectLink(linkPath);
+    // 失效链接或目标不是有效 Skill 的链接，提示用户但不做处理。
+    if (
+      inspected.kind !== "link" ||
+      inspected.dangling ||
+      !(await hasValidSkillFile(inspected.targetPath))
+    ) {
+      issues.push(
+        createIssue(
+          "warning",
+          `Agent“${agent.name}”中发现非 Skill 或失效的手动链接 ${linkPath}，已忽略并保留。`,
+        ),
+      );
+    }
+  }
   return issues;
 }
 
@@ -1188,7 +1368,7 @@ function auditUnmanagedLinks(agent, knownPaths) {
  * @returns {{linked: Array, external: Array, createdLinks: Array, issues: Array}} 本次同步结果
  */
 // 同步遵循“只删除自己创建的链接”原则，任何手动文件、目录和链接都只提示不改动。
-function syncAgent(config, agent, scan) {
+async function syncAgent(config, agent, scan) {
   const issues = [];
   // 该 Agent 已启用的分组 id 集合。
   const enabled = new Set(config.enabledGroups[agent.id] || []);
@@ -1210,6 +1390,15 @@ function syncAgent(config, agent, scan) {
   const external = [];
   // 本次新建的链接记录，数据库保存失败时用于回滚。
   const createdLinks = [];
+  const finish = () => {
+    agent.externalLinkedCount = external.length;
+    return {
+      linked,
+      external,
+      createdLinks,
+      issues: uniqueIssues(issues),
+    };
+  };
 
   // 同步配置可能先于本机路径同步到新设备；未配置目录时保持只读，不猜测其他设备的路径。
   if (!agent.directory) {
@@ -1220,12 +1409,15 @@ function syncAgent(config, agent, scan) {
       ),
     );
     agent.managedLinks = previousLinks;
-    return { linked, external, createdLinks, issues };
+    return finish();
   }
 
   let targetUsable = true;
   try {
-    const stat = fs.statSync(agent.directory);
+    const stat = await withReadTimeout(
+      fsp.stat(agent.directory),
+      `检查 Agent“${agent.name}”目录`,
+    );
     if (!stat.isDirectory()) throw new Error("该路径不是文件夹");
   } catch (error) {
     // 目录不可用（被删除、无权限、不是目录）：不改动任何文件，直接返回。
@@ -1240,49 +1432,49 @@ function syncAgent(config, agent, scan) {
   if (!targetUsable) {
     // 保持原记录不变，等待目录恢复后继续管理。
     agent.managedLinks = previousLinks;
-    return { linked, external, createdLinks, issues };
+    return finish();
   }
   // 数据库关键结构异常时只做观察，不根据兜底后的空值改动任何文件。
   if (scan.locked) {
-    Object.entries(previousLinks).forEach(([skillId, link]) => {
+    for (const [skillId, link] of Object.entries(previousLinks)) {
       // 仅统计确实仍指向原目标、且文件标识一致的链接。
-      if (!isDirectChild(agent.directory, link.linkPath)) return;
-      const inspected = inspectLink(link.linkPath, link.sourcePath);
+      if (!(await isDirectChild(agent.directory, link.linkPath))) continue;
+      const inspected = await inspectLink(link.linkPath, link.sourcePath);
       if (
         inspected.kind === "link" &&
         inspected.sameTarget &&
         identitiesEqual(link.identity, inspected.identity)
       )
         linked.push(skillId);
-    });
+    }
     agent.managedLinks = previousLinks;
     // 已知路径用于排除自身管理的链接，避免误报。
     const knownPaths = new Set(
       Object.values(previousLinks).map((link) => comparablePath(link.linkPath)),
     );
-    issues.push(...auditUnmanagedLinks(agent, knownPaths));
-    return { linked, external, createdLinks, issues: uniqueIssues(issues) };
+    issues.push(...(await auditUnmanagedLinks(agent, knownPaths)));
+    return finish();
   }
 
   // 处理历史受管链接：保留仍然需要的，安全移除不再需要的。
-  Object.entries(previousLinks).forEach(([skillId, link]) => {
+  for (const [skillId, link] of Object.entries(previousLinks)) {
     const skill = skillById.get(skillId);
     // 记录位置异常（不在 Agent 目录第一层）：仅提示，绝不删除。
-    if (!isDirectChild(agent.directory, link.linkPath)) {
+    if (!(await isDirectChild(agent.directory, link.linkPath))) {
       issues.push(
         createIssue(
           "warning",
           `Agent“${agent.name}”存在超出其 Skills 目录的异常受管记录，已停止管理且不会删除该路径：${link.linkPath}`,
         ),
       );
-      return;
+      continue;
     }
     // 扫描不完整时，无法确认 Skill 是否真的被删除，因此保留仍被启用的受管链接。
     const shouldKeep =
       desiredSkillIds.has(skillId) && (skill || !scan.complete);
     // 源目录以当前扫描结果为准，扫描不到时回退到历史记录。
     const currentSource = skill?.sourcePath || link.sourcePath;
-    const inspected = inspectLink(link.linkPath, link.sourcePath);
+    const inspected = await inspectLink(link.linkPath, link.sourcePath);
     // 仍是同一链接（类型、目标、文件标识都匹配）才算「仍归本应用所有」。
     const stillOwned =
       inspected.kind === "link" &&
@@ -1292,7 +1484,7 @@ function syncAgent(config, agent, scan) {
     if (
       shouldKeep &&
       stillOwned &&
-      pathsEqual(link.sourcePath, currentSource)
+      (await pathsEqual(link.sourcePath, currentSource))
     ) {
       // “待创建”记录说明上次可能在创建后中断；确认链接存在后补齐身份并转为正式记录。
       nextLinks[skillId] = link.pending
@@ -1303,16 +1495,16 @@ function syncAgent(config, agent, scan) {
           }
         : link;
       linked.push(skillId);
-      return;
+      continue;
     }
     // 扫描不完整且链接仍归本应用所有：宁可保留，等下次完整扫描再处理。
     if (shouldKeep && !scan.complete && stillOwned) {
       nextLinks[skillId] = link;
       linked.push(skillId);
-      return;
+      continue;
     }
     // 其余情况执行安全移除（内部会再次校验，只有确认归本应用所有才会真正删除）。
-    const removal = removeOwnedLink(
+    const removal = await removeOwnedLink(
       link,
       `Agent“${agent.name}”中的受管链接 ${link.linkPath}`,
       agent.directory,
@@ -1329,7 +1521,7 @@ function syncAgent(config, agent, scan) {
         ),
       );
     }
-  });
+  }
 
   const desiredSkills = [...desiredSkillIds]
     .map((skillId) => skillById.get(skillId))
@@ -1340,9 +1532,11 @@ function syncAgent(config, agent, scan) {
       counts.set(skill.folderName, (counts.get(skill.folderName) || 0) + 1),
     new Map(),
   );
-  desiredSkills.forEach((skill) => {
+  // 先完成只读冲突检查，再把本轮全部待创建记录一次性落库，避免每个 Skill 重写整份配置。
+  const pendingCreations = [];
+  for (const skill of desiredSkills) {
     // 已在上一步保留的链接无需重复创建。
-    if (nextLinks[skill.id]) return;
+    if (nextLinks[skill.id]) continue;
     // 多个启用 Skill 目录名相同：跳过创建，避免覆盖，并提示用户改名。
     if (folderCounts.get(skill.folderName) > 1) {
       issues.push(
@@ -1351,10 +1545,10 @@ function syncAgent(config, agent, scan) {
           `多个已启用 Skills 使用同一目录名“${skill.folderName}”，为避免覆盖，Agent“${agent.name}”未创建这些链接。`,
         ),
       );
-      return;
+      continue;
     }
     const linkPath = path.join(agent.directory, skill.folderName);
-    const inspected = inspectLink(linkPath, skill.sourcePath);
+    const inspected = await inspectLink(linkPath, skill.sourcePath);
     // 目标位置已被占用：区分「同源手动链接」「普通文件/目录」「其他链接」分别提示。
     if (inspected.kind !== "missing") {
       if (inspected.kind === "link" && inspected.sameTarget) {
@@ -1374,30 +1568,41 @@ function syncAgent(config, agent, scan) {
           ),
         );
       }
-      return;
+      continue;
     }
-    try {
-      // 两阶段落库：先登记待创建链接，再触碰文件系统，保证异常退出后仍能追踪归属。
+    pendingCreations.push({ skill, linkPath });
+  }
+
+  if (pendingCreations.length) {
+    pendingCreations.forEach(({ skill, linkPath }) => {
       nextLinks[skill.id] = {
         linkPath,
         sourcePath: skill.sourcePath,
         pending: true,
       };
-      agent.managedLinks = nextLinks;
-      try {
-        writeConfig(config);
-      } catch (error) {
+    });
+    agent.managedLinks = nextLinks;
+    try {
+      // 一次批量安全检查点覆盖本轮所有待创建链接，兼顾崩溃恢复与写入性能。
+      writeConfig(config);
+    } catch (error) {
+      pendingCreations.forEach(({ skill }) => {
         delete nextLinks[skill.id];
-        issues.push(
-          createIssue(
-            "error",
-            `创建“${skill.name}”链接前无法保存安全检查点：${error.message}。未创建该链接。`,
-          ),
-        );
-        return;
-      }
+      });
+      issues.push(
+        createIssue(
+          "error",
+          `创建链接前无法保存批量安全检查点：${error.message}。本轮 ${pendingCreations.length} 个链接均未创建。`,
+        ),
+      );
+      pendingCreations.length = 0;
+    }
+  }
+
+  for (const { skill, linkPath } of pendingCreations) {
+    try {
       // Windows 使用 junction（目录联接，无需管理员权限），其他平台使用目录符号链接。
-      fs.symlinkSync(
+      await fsp.symlink(
         skill.sourcePath,
         linkPath,
         process.platform === "win32" ? "junction" : "dir",
@@ -1405,7 +1610,10 @@ function syncAgent(config, agent, scan) {
       let identity;
       try {
         // 记录文件标识，用于后续判断链接是否被外部替换。
-        const created = fs.lstatSync(linkPath);
+        const created = await withReadTimeout(
+          fsp.lstat(linkPath),
+          `记录链接标识 ${linkPath}`,
+        );
         identity = {
           dev: Number(created.dev),
           ino: Number(created.ino),
@@ -1438,7 +1646,7 @@ function syncAgent(config, agent, scan) {
         ),
       );
     }
-  });
+  }
 
   // 已知路径 = 本轮受管链接 + 期望的链接位置，用于审计外部链接时排除自身。
   const knownPaths = new Set([
@@ -1447,10 +1655,10 @@ function syncAgent(config, agent, scan) {
       comparablePath(path.join(agent.directory, skill.folderName)),
     ),
   ]);
-  issues.push(...auditUnmanagedLinks(agent, knownPaths));
+  issues.push(...(await auditUnmanagedLinks(agent, knownPaths)));
   // 就地更新受管链接记录，由调用方统一写回数据库。
   agent.managedLinks = nextLinks;
-  return { linked, external, createdLinks, issues: uniqueIssues(issues) };
+  return finish();
 }
 
 /**
@@ -1460,11 +1668,12 @@ function syncAgent(config, agent, scan) {
  * @param {object} scan - 仓库扫描结果
  * @returns {object} { [agentId]: syncAgent 的返回值 }
  */
-function syncAllAgents(config, scan) {
+async function syncAllAgents(config, scan) {
   const results = {};
-  config.agents.forEach((agent) => {
-    results[agent.id] = syncAgent(config, agent, scan);
-  });
+  // 顺序执行可避免多个 Agent 同时冲击磁盘，也让每个批量检查点保持可恢复。
+  for (const agent of config.agents) {
+    results[agent.id] = await syncAgent(config, agent, scan);
+  }
   return results;
 }
 
@@ -1530,7 +1739,9 @@ function publicAgent(agent, syncResult) {
     ? syncResult.linked.length
     : Object.keys(agent.managedLinks || {}).length;
   // 外部同源链接数量（不由本应用创建，仅统计展示）。
-  const externalLinkedCount = syncResult?.external.length || 0;
+  const externalLinkedCount = syncResult
+    ? syncResult.external.length
+    : agent.externalLinkedCount || 0;
   return {
     id: agent.id,
     name: agent.name,
@@ -1580,13 +1791,31 @@ function buildState(
  * @returns {object} 前端可用的完整状态
  * @throws {Error} 恢复检查点无法写入时抛出，且不会执行任何文件操作
  */
-function refreshState(config) {
-  const scan = scanConfiguredRepository(config);
+async function refreshState(config, targetAgentId = "") {
+  const scan = await scanConfiguredRepository(config);
+  // 只有完整扫描结果才替换首屏缓存；不完整结果绝不成为后续清理依据。
+  if (scan.complete && !scan.locked)
+    config._cachedSkills = normalizeCachedSkills(scan.skills);
   const reconciledIssues = reconcileDeletedSkills(config, scan);
+  // 仓库删除导致共享分组内容变化时，需要同步全部 Agent，避免其他目录遗留旧链接。
+  const effectiveTargetAgentId = reconciledIssues.length
+    ? ""
+    : targetAgentId;
   // 只读保护时只观察链接；正常状态先保存恢复检查点，再开始文件系统变更。
   if (!config._syncLocked) writeConfig(config);
-  const orphanIssues = config._syncLocked ? [] : cleanupOrphanAgents(config);
-  const syncResults = syncAllAgents(config, scan);
+  const orphanIssues = config._syncLocked
+    ? []
+    : await cleanupOrphanAgents(config);
+  // 单个 Agent 的开关变更只同步目标 Agent；其余操作仍执行完整一致性校验。
+  const syncResults = effectiveTargetAgentId
+    ? {
+        [effectiveTargetAgentId]: await syncAgent(
+          config,
+          config.agents.find((agent) => agent.id === effectiveTargetAgentId),
+          scan,
+        ),
+      }
+    : await syncAllAgents(config, scan);
   const persistenceIssues = [];
   if (!config._syncLocked) {
     try {
@@ -1594,10 +1823,10 @@ function refreshState(config) {
     } catch (error) {
       // 检查点已包含业务目标和旧链接记录；这里只回滚未持久化的新链接，删除项可在下次启动自愈。
       const rollbackIssues = [];
-      config.agents.forEach((agent) => {
+      for (const agent of config.agents) {
         const createdLinks = syncResults[agent.id]?.createdLinks || [];
-        createdLinks.forEach((link) => {
-          const removal = removeOwnedLink(
+        for (const link of createdLinks) {
+          const removal = await removeOwnedLink(
             link,
             `保存失败后的新建链接 ${link.linkPath}`,
             agent.directory,
@@ -1610,8 +1839,8 @@ function refreshState(config) {
               (id) => id !== link.skillId,
             );
           }
-        });
-      });
+        }
+      }
       // 回滚后再尝试一次最终保存；成功则数据库与当前磁盘已经重新一致。
       try {
         writeConfig(config);
@@ -1653,34 +1882,34 @@ function refreshState(config) {
  * @param {object} agent - 目标 Agent（会就地更新其 managedLinks）
  * @returns {Array} 问题列表（含无法删除的错误）
  */
-function cleanupAgentLinks(agent) {
+async function cleanupAgentLinks(agent) {
   const issues = [];
   // 未能放弃管理的记录需要保留，便于下次重试。
   const remaining = {};
-  Object.entries(normalizeManagedLinks(agent.managedLinks)).forEach(
-    ([skillId, link]) => {
-      const removal = removeOwnedLink(
-        link,
-        `Agent“${agent.name}”中的受管链接 ${link.linkPath}`,
-        agent.directory,
-      );
-      issues.push(...removal.issues);
-      if (!removal.relinquished) remaining[skillId] = link;
-    },
-  );
+  for (const [skillId, link] of Object.entries(
+    normalizeManagedLinks(agent.managedLinks),
+  )) {
+    const removal = await removeOwnedLink(
+      link,
+      `Agent“${agent.name}”中的受管链接 ${link.linkPath}`,
+      agent.directory,
+    );
+    issues.push(...removal.issues);
+    if (!removal.relinquished) remaining[skillId] = link;
+  }
   agent.managedLinks = remaining;
   return uniqueIssues(issues);
 }
 
 /** 清理当前设备上已经不属于共享配置的 Agent 链接，并保留失败项供下次重试。 */
-function cleanupOrphanAgents(config) {
+async function cleanupOrphanAgents(config) {
   const issues = [];
   const remaining = [];
-  (config._orphanAgents || []).forEach((agent) => {
-    const agentIssues = cleanupAgentLinks(agent);
+  for (const agent of config._orphanAgents || []) {
+    const agentIssues = await cleanupAgentLinks(agent);
     issues.push(...agentIssues);
     if (Object.keys(agent.managedLinks || {}).length) remaining.push(agent);
-  });
+  }
   config._orphanAgents = remaining;
   return uniqueIssues(issues);
 }
@@ -1727,13 +1956,25 @@ window.skillsManager = {
   },
 
   /**
-   * 读取当前状态并执行一次完整刷新（扫描仓库 + 同步链接）。
-   * 前端初始化（appStore.initialize）与页面首次加载都会调用。
+   * 读取当前数据库状态与上次完整扫描缓存，不执行文件系统写操作。
+   * 前端先用该结果绘制首屏，再通过 reconcile 异步完成一致性校验。
    *
    * @returns {object} 前端可用的完整状态
    */
-  getState() {
-    return refreshState(readConfig());
+  async getState() {
+    const config = await readConfig();
+    // 启动阶段只返回已验证的缓存，不扫描仓库、不修改链接，确保窗口可以立即绘制。
+    return buildState(
+      config,
+      { skills: config._cachedSkills || [] },
+      {},
+      config._issues || [],
+    );
+  },
+
+  /** 启动首屏绘制后执行后台一致性校验。 */
+  async reconcile() {
+    return refreshState(await readConfig());
   },
 
   /**
@@ -1744,8 +1985,8 @@ window.skillsManager = {
    * @returns {{theme: string, issues: Array}} 变更后的主题与读取阶段发现的问题
    */
   // 主题保存不依赖文件系统，主仓库暂时离线时仍可正常切换。
-  setTheme(theme) {
-    const config = readConfig();
+  async setTheme(theme) {
+    const config = await readConfig();
     config.theme = theme === "dark" ? "dark" : "light";
     // 只读保护时不能用规范化后的配置覆盖损坏原文档，但主题仍可独立更新。
     if (config._syncLocked) {
@@ -1772,23 +2013,32 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态
    * @throws {Error} 目录非法、与某个 Agent 目录互相包含、或处于只读保护
    */
-  setRepository(repositoryPath) {
-    const config = readConfig();
+  async setRepository(repositoryPath) {
+    const config = await readConfig();
     assertConfigWritable(config);
-    const normalizedPath = normalizeDirectory(
+    const normalizedPath = await normalizeDirectory(
       repositoryPath,
       "Skills 仓库目录",
     );
-    // 仓库与 Agent 目录互相包含会导致扫描结果污染（把自己的链接当成 Skill）。
-    const nestedAgent = config.agents.find(
-      (agent) =>
-        agent.directory &&
-        (isInsideDirectory(normalizedPath, agent.directory) ||
-          isInsideDirectory(agent.directory, normalizedPath)),
-    );
-    if (nestedAgent)
+    if (path.parse(normalizedPath).root === normalizedPath)
       throw new Error(
-        `Skills 仓库不能与 Agent“${nestedAgent.name}”的目录相同或互相包含，请调整其中一个路径`,
+        "Skills 仓库不能是磁盘根目录，请选择专用的 Skills 文件夹",
+      );
+    // 仓库与 Agent 目录互相包含会导致扫描结果污染（把自己的链接当成 Skill）。
+    let conflictingAgent;
+    for (const agent of config.agents) {
+      if (
+        agent.directory &&
+        ((await isInsideDirectory(normalizedPath, agent.directory)) ||
+          (await isInsideDirectory(agent.directory, normalizedPath)))
+      ) {
+        conflictingAgent = agent;
+        break;
+      }
+    }
+    if (conflictingAgent)
+      throw new Error(
+        `Skills 仓库不能与 Agent“${conflictingAgent.name}”的目录相同或互相包含，请调整其中一个路径`,
       );
     config.repositoryPath = normalizedPath;
     return refreshState(config);
@@ -1800,8 +2050,8 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态
    * @throws {Error} 尚未配置仓库路径或处于只读保护
    */
-  refreshSkills() {
-    const config = readConfig();
+  async refreshSkills() {
+    const config = await readConfig();
     assertConfigWritable(config);
     if (!config.repositoryPath) throw new Error("请先配置 Skills 仓库目录");
     return refreshState(config);
@@ -1815,8 +2065,8 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态
    * @throws {Error} 分组 id 重复或处于只读保护
    */
-  saveGroups(groups) {
-    const config = readConfig();
+  async saveGroups(groups) {
+    const config = await readConfig();
     assertConfigWritable(config);
     // 只保留 id、name 非空的分组，并对 skillIds 去重。
     config.groups = (Array.isArray(groups) ? groups : [])
@@ -1854,12 +2104,12 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态（issues 中附加了目录变更时的清理问题）
    * @throws {Error} 名称为空、目录非法、目录冲突或处于只读保护
    */
-  upsertAgent(input) {
-    const config = readConfig();
+  async upsertAgent(input) {
+    const config = await readConfig();
     assertConfigWritable(config);
     const name = String(input?.name || "").trim();
     if (!name) throw new Error("请输入 Agent 名称");
-    const directory = normalizeDirectory(
+    const directory = await normalizeDirectory(
       String(input?.directory || ""),
       "Agent Skills 目录",
     );
@@ -1868,11 +2118,14 @@ window.skillsManager = {
       ? String(input.id)
       : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (!isSafeRecordKey(id)) throw new Error("Agent 标识无效，请重新创建 Agent");
-    assertSafeAgentDirectory(config, directory, id);
+    await assertSafeAgentDirectory(config, directory, id);
     const existing = config.agents.find((agent) => agent.id === id);
     if (existing) {
       // 目录变更：旧目录记录转为设备级待清理项，refreshState 保存检查点后再安全清理。
-      if (existing.directory && !pathsEqual(existing.directory, directory)) {
+      if (
+        existing.directory &&
+        !(await pathsEqual(existing.directory, directory))
+      ) {
         config._orphanAgents.push({
           id: `${existing.id}:moved:${Date.now()}`,
           name: existing.name,
@@ -1898,8 +2151,8 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态（issues 中附加了清理问题）
    * @throws {Error} Agent 不存在、检查点保存失败或处于只读保护
    */
-  deleteAgent(agentId) {
-    const config = readConfig();
+  async deleteAgent(agentId) {
+    const config = await readConfig();
     assertConfigWritable(config);
     const agent = config.agents.find((item) => item.id === agentId);
     if (!agent)
@@ -1924,18 +2177,19 @@ window.skillsManager = {
    * @throws {Error} 安全检查点或数据库清除失败
    */
   // 未清理完成的链接继续保留设备级记录，避免产生无法追踪的链接。
-  clearData() {
-    const config = readConfig();
+  async clearData() {
+    const config = await readConfig();
     const cleared = attachRuntime(createDefaultConfig(), {
       _issues: [],
       _syncLocked: false,
       _deviceId: config._deviceId,
       _deviceStates: config._deviceStates,
       _orphanAgents: [...config.agents, ...(config._orphanAgents || [])],
+      _cachedSkills: [],
     });
     // 先用单文档写入“共享配置已清空 + 本机待清理记录”的检查点。
     writeConfig(cleared);
-    const issues = cleanupOrphanAgents(cleared);
+    const issues = await cleanupOrphanAgents(cleared);
     if (config._syncLocked) {
       issues.push(
         createIssue(
@@ -1962,8 +2216,8 @@ window.skillsManager = {
    * @returns {object} 刷新后的完整状态
    * @throws {Error} Agent 不存在或处于只读保护
    */
-  setAgentGroups(agentId, groupIds) {
-    const config = readConfig();
+  async setAgentGroups(agentId, groupIds) {
+    const config = await readConfig();
     assertConfigWritable(config);
     const agent = config.agents.find((item) => item.id === agentId);
     if (!agent) throw new Error("未找到该 Agent，配置可能已被其他窗口更新");
@@ -1972,6 +2226,6 @@ window.skillsManager = {
     config.enabledGroups[agentId] = [
       ...new Set(Array.isArray(groupIds) ? groupIds.map(String) : []),
     ].filter((groupId) => validIds.has(groupId));
-    return refreshState(config);
+    return refreshState(config, agentId);
   },
 };

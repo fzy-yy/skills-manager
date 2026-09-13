@@ -52,6 +52,8 @@ export const useAppStore = defineStore("app", () => {
   const noticeTimers = new Map();
   // 确认对话框的 resolve 函数，由 confirm() 赋值、resolveDialog() 调用。
   let dialogResolver;
+  // 文件与数据库操作必须串行，避免快速重复点击产生两轮相互覆盖的链接同步。
+  let operationInFlight = false;
 
   // ---------- 派生状态 ----------
   // 是否已经配置过统一 Skills 仓库目录。
@@ -69,6 +71,11 @@ export const useAppStore = defineStore("app", () => {
     if (!window.skillsManager)
       throw new Error("请在 uTools 开发环境中运行插件以使用本地目录功能");
     return window.skillsManager;
+  }
+
+  /** 让出一个宏任务，使 Vue 有机会先绘制忙碌状态和进度条。 */
+  function waitForRender() {
+    return new Promise((resolve) => setTimeout(resolve, 0));
   }
 
   // ---------- 状态同步 ----------
@@ -117,8 +124,20 @@ export const useAppStore = defineStore("app", () => {
    */
   function notify(message, type = "success", duration = 5200) {
     if (!message) return;
+    const normalizedMessage = String(message);
+    // 后台一致性校验可能重复发现同一问题；相同提示只保留一条，避免大量 DOM 与定时器堆积。
+    if (
+      notices.value.some(
+        (notice) =>
+          notice.message === normalizedMessage && notice.type === type,
+      )
+    )
+      return;
+    // 全局提示设置硬上限，异常链接很多时也不会拖慢渲染。
+    while (notices.value.length >= 20)
+      dismissNotice(notices.value[0].id);
     const id = ++noticeSequence;
-    notices.value.push({ id, message: String(message), type });
+    notices.value.push({ id, message: normalizedMessage, type });
     // 错误保留更久；多条问题会同时展示，避免后一个提示覆盖前一个错误。
     const timeout = type === "error" ? Math.max(duration, 9000) : duration;
     noticeTimers.set(
@@ -152,8 +171,16 @@ export const useAppStore = defineStore("app", () => {
    * @returns {Promise<object>} preload 服务返回的最新状态
    */
   async function execute(operation, successMessage) {
+    if (operationInFlight) {
+      const error = new Error("已有操作正在进行，请等待完成后再试");
+      notify(error.message, "warning");
+      throw error;
+    }
+    operationInFlight = true;
     busy.value = true;
     try {
+      // preload 调用前先让界面完成一次更新，即使底层偶发变慢也能看到明确的处理中状态。
+      await waitForRender();
       const result = await operation();
       if (result) applyState(result);
       const issues = reportIssues(result?.issues);
@@ -166,6 +193,7 @@ export const useAppStore = defineStore("app", () => {
       // 继续向上抛出，交给调用方决定是否中断后续流程。
       throw error;
     } finally {
+      operationInFlight = false;
       busy.value = false;
     }
   }
@@ -212,11 +240,17 @@ export const useAppStore = defineStore("app", () => {
    * 未运行在 uTools 环境时退化为浅色主题，保证在浏览器预览时仍可用。
    */
   async function initialize() {
+    let needsReconcile = false;
     try {
       if (window.skillsManager) {
         const result = await api().getState();
         applyState(result);
         reportIssues(result?.issues);
+        needsReconcile = Boolean(
+          result?.repositoryPath ||
+            result?.groups?.length ||
+            result?.agents?.length,
+        );
       }
       // 非 uTools 环境没有持久化能力，强制使用浅色主题，避免残留 class。
       else document.documentElement.classList.remove("dark");
@@ -225,6 +259,12 @@ export const useAppStore = defineStore("app", () => {
     } finally {
       // 无论成功失败都标记为已初始化，避免页面一直停留在加载态。
       ready.value = true;
+    }
+    // 首屏缓存状态已经绘制后，再异步检查仓库和链接；失败由 execute 统一提示。
+    if (needsReconcile && api().reconcile) {
+      try {
+        await execute(() => api().reconcile());
+      } catch (_) {}
     }
   }
 
