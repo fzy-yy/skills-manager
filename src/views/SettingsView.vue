@@ -1,5 +1,5 @@
 <script setup>
-import { Check, Moon, Palette, Sun } from '@lucide/vue'
+import { Check, Database, Moon, Palette, Sun, Trash2 } from '@lucide/vue'
 import PageHeader from '../components/PageHeader.vue'
 import { useAppStore } from '../stores/appStore'
 
@@ -14,6 +14,17 @@ async function selectTheme (theme) {
   if (store.theme === theme) return
   const saved = await store.setTheme(theme)
   if (saved) store.notify('主题设置已保存')
+}
+
+async function clearData () {
+  const accepted = await store.confirm({
+    title: '清除本地数据',
+    message: '这会清除 Skills 仓库路径、所有分组、Agent 配置、主题设置及本应用创建的链接。统一 Skills 仓库中的源文件不会被删除。',
+    confirmText: '清除数据',
+    tone: 'danger'
+  })
+  if (!accepted) return
+  try { await store.clearData() } catch (_) {}
 }
 </script>
 
@@ -43,6 +54,14 @@ async function selectTheme (theme) {
           <span class="min-w-0 flex-1"><strong class="block font-bold">{{ option.label }}</strong><small class="mt-1 block leading-5 text-ink-muted">{{ option.description }}</small></span>
           <span class="grid size-6 shrink-0 place-items-center rounded-full border" :class="store.theme === option.value ? 'border-primary bg-primary text-on-primary' : 'border-border-strong text-transparent'"><Check :size="15" :stroke-width="2.2" /></span>
         </button>
+      </div>
+    </div>
+
+    <div class="mt-4 rounded-xl border border-border bg-surface p-5 shadow-sm">
+      <div class="flex items-center gap-4">
+        <span class="grid size-10 shrink-0 place-items-center rounded-lg bg-danger-soft text-danger"><Database :size="20" :stroke-width="1.8" /></span>
+        <div class="min-w-0 flex-1"><h2 class="m-0 text-base font-semibold text-ink">数据管理</h2><p class="mt-1 mb-0 text-xs leading-5 text-ink-muted">清除 uTools 本地数据库中的插件配置，并移除本应用创建的 Agent Skills 链接。</p></div>
+        <button class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md border border-danger bg-danger-soft px-4 font-semibold text-danger hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50" type="button" :disabled="store.busy" @click="clearData"><Trash2 :size="17" :stroke-width="1.8" />清除数据</button>
       </div>
     </div>
   </section>

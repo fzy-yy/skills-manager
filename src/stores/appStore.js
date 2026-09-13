@@ -113,6 +113,7 @@ export const useAppStore = defineStore('app', () => {
     saveGroups: nextGroups => execute(() => api().saveGroups(nextGroups), '分组已保存'),
     upsertAgent: agent => execute(() => api().upsertAgent(agent), agent.id ? 'Agent 已更新' : 'Agent 已添加'),
     deleteAgent: id => execute(() => api().deleteAgent(id), 'Agent 已删除，相关链接已清理'),
+    clearData: () => execute(() => api().clearData(), '本地数据已清除'),
     setAgentGroups: (agentId, groupIds) => execute(() => api().setAgentGroups(agentId, groupIds))
   }
 })

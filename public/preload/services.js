@@ -2,34 +2,72 @@ const fs = require('node:fs')
 const path = require('node:path')
 
 const CONFIG_VERSION = 1
-const CONFIG_FILE = path.join(window.utools.getPath('userData'), 'skills-manager', 'config.json')
+const LEGACY_CONFIG_FILE = path.join(window.utools.getPath('userData'), 'skills-manager', 'config.json')
+const STORAGE_KEYS = Object.freeze({
+  version: 'skills-manager/version',
+  repositoryPath: 'skills-manager/repository-path',
+  groups: 'skills-manager/groups',
+  agents: 'skills-manager/agents',
+  enabledGroups: 'skills-manager/enabled-groups',
+  theme: 'skills-manager/theme'
+})
 
 function createDefaultConfig () {
   return { version: CONFIG_VERSION, repositoryPath: '', groups: [], agents: [], enabledGroups: {}, theme: 'light' }
 }
 
-function readConfig () {
-  try {
-    if (!fs.existsSync(CONFIG_FILE)) return createDefaultConfig()
-    const parsed = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'))
-    return {
-      ...createDefaultConfig(),
-      ...parsed,
-      groups: Array.isArray(parsed.groups) ? parsed.groups : [],
-      agents: Array.isArray(parsed.agents) ? parsed.agents : [],
-      enabledGroups: parsed.enabledGroups && typeof parsed.enabledGroups === 'object' ? parsed.enabledGroups : {}
-    }
-  } catch (error) {
-    throw new Error(`读取配置失败：${error.message}`)
+function normalizeConfig (input) {
+  const config = input && typeof input === 'object' ? input : {}
+  return {
+    version: Number(config.version) || CONFIG_VERSION,
+    repositoryPath: typeof config.repositoryPath === 'string' ? config.repositoryPath : '',
+    groups: Array.isArray(config.groups) ? config.groups : [],
+    agents: Array.isArray(config.agents) ? config.agents : [],
+    enabledGroups: config.enabledGroups && typeof config.enabledGroups === 'object' ? config.enabledGroups : {},
+    theme: config.theme === 'dark' ? 'dark' : 'light'
   }
 }
 
 function writeConfig (config) {
-  const directory = path.dirname(CONFIG_FILE)
-  fs.mkdirSync(directory, { recursive: true })
-  const temporaryFile = `${CONFIG_FILE}.tmp`
-  fs.writeFileSync(temporaryFile, JSON.stringify(config, null, 2), 'utf8')
-  fs.renameSync(temporaryFile, CONFIG_FILE)
+  const normalized = normalizeConfig(config)
+  Object.entries(STORAGE_KEYS).forEach(([field, key]) => {
+    window.utools.dbStorage.setItem(key, normalized[field])
+  })
+}
+
+function removeLegacyConfig () {
+  ;[LEGACY_CONFIG_FILE, `${LEGACY_CONFIG_FILE}.tmp`].forEach(file => {
+    try {
+      if (fs.existsSync(file)) fs.unlinkSync(file)
+    } catch (_) {}
+  })
+}
+
+function readConfig () {
+  try {
+    const stored = {}
+    Object.entries(STORAGE_KEYS).forEach(([field, key]) => {
+      stored[field] = window.utools.dbStorage.getItem(key)
+    })
+    const hasDatabaseData = Object.values(stored).some(value => value !== null && value !== undefined)
+    if (hasDatabaseData) return normalizeConfig(stored)
+
+    // 首次升级时迁移旧 JSON；数据库写入完成后再删除旧文件。
+    if (fs.existsSync(LEGACY_CONFIG_FILE)) {
+      const legacyConfig = normalizeConfig(JSON.parse(fs.readFileSync(LEGACY_CONFIG_FILE, 'utf8')))
+      writeConfig(legacyConfig)
+      if (window.utools.dbStorage.getItem(STORAGE_KEYS.version) === legacyConfig.version) removeLegacyConfig()
+      return legacyConfig
+    }
+    return createDefaultConfig()
+  } catch (error) {
+    throw new Error(`读取本地数据库失败：${error.message}`)
+  }
+}
+
+function clearStoredConfig () {
+  Object.values(STORAGE_KEYS).forEach(key => window.utools.dbStorage.removeItem(key))
+  removeLegacyConfig()
 }
 
 function normalizeDirectory (directory) {
@@ -254,6 +292,16 @@ window.skillsManager = {
     delete config.enabledGroups[agentId]
     writeConfig(config)
     return buildState(config)
+  },
+
+  // 清空数据库前先移除所有受管链接，避免留下无法追踪的孤立链接。
+  clearData () {
+    const config = readConfig()
+    config.agents.forEach(agent => {
+      Object.values(agent.managedLinks || {}).forEach(removeManagedLink)
+    })
+    clearStoredConfig()
+    return buildState(createDefaultConfig(), [])
   },
 
   setAgentGroups (agentId, groupIds) {
