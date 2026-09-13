@@ -8,7 +8,7 @@
   表单同时承担新增与编辑：
   - editingId 为空表示新增，点击“编辑”后填入该 Agent 的 id/名称/目录；
   - 保存时把 id 一并提交，preload 服务据此判断是更新还是新增；
-  - 修改目录会先把旧目录下由本应用创建的链接安全清理，再写入新目录。
+  - 修改目录会先保存可恢复检查点，再安全清理旧目录链接并应用新目录。
 -->
 <script setup>
 // 图标：Bot 表示 Agent，Pencil 编辑，Trash2 删除。
@@ -179,7 +179,7 @@ async function remove(agent) {
         <div class="flex min-w-0 flex-1 flex-col gap-1">
           <strong class="truncate">{{ agent.name }}</strong
           ><span class="truncate font-mono text-xs text-ink-muted">{{
-            agent.directory
+            agent.directory || "当前设备尚未配置目录"
           }}</span>
         </div>
         <!-- 链接数量：受管链接 + 外部已存在的同源手动链接 -->

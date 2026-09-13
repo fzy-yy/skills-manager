@@ -14,7 +14,7 @@
  * 三条核心安全原则（贯穿全文）：
  *  A. 只管理自己创建的东西：删除前必须同时校验链接路径、链接目标与创建时记录的文件标识；
  *  B. 数据不完整就不做清理：扫描不完整或数据库结构异常时进入只读保护，绝不依据兜底空值删文件；
- *  C. 先写数据库再落盘、落盘失败要回滚：数据库保存失败时回滚本轮新建的链接，避免产生孤立链接。
+ *  C. 配置单文档原子保存：业务配置与设备级链接记录一次写入，避免多键部分成功造成状态撕裂。
  */
 
 // Node.js 文件系统模块：读取 SKILL.md、创建/删除链接、遍历目录。
@@ -23,21 +23,16 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 // 配置结构版本号：配置结构变更时递增，便于将来做数据迁移。
-const CONFIG_VERSION = 1;
-// uTools 本地数据库（dbStorage）的键名表：字段名 → 存储键。
-// 使用 Object.freeze 冻结，避免运行期被误改导致读写键名不一致。
-const STORAGE_KEYS = Object.freeze({
-  // 配置结构版本
+const CONFIG_VERSION = 2;
+// 所有同步配置集中在一个文档内，dbStorage.setItem 单次写入不会出现半份新、半份旧的配置。
+const STATE_KEY = "skills-manager/state-v2";
+// 仅用于把当前开发阶段已经产生的 v1 数据迁移到单文档结构，不涉及旧 JSON 文件。
+const LEGACY_STORAGE_KEYS = Object.freeze({
   version: "skills-manager/version",
-  // 统一 Skills 仓库目录的绝对路径
   repositoryPath: "skills-manager/repository-path",
-  // 分组列表
   groups: "skills-manager/groups",
-  // Agent 列表（含每个 Agent 的受管链接记录）
   agents: "skills-manager/agents",
-  // 每个 Agent 已启用的分组 id 列表
   enabledGroups: "skills-manager/enabled-groups",
-  // 界面主题（light / dark）
   theme: "skills-manager/theme",
 });
 
@@ -106,7 +101,7 @@ function uniqueIssues(issues) {
 }
 
 /**
- * 规范化「受管链接」记录，即 { [skillId]: { linkPath, sourcePath, identity? } } 结构。
+ * 规范化「受管链接」记录，即 { [skillId]: { linkPath, sourcePath, identity?, pending? } } 结构。
  * 记录损坏（非对象、缺少路径字段）时直接丢弃，避免污染后续的同步与删除逻辑。
  *
  * @param {any} input - 数据库中保存的 managedLinks 原始值
@@ -140,6 +135,7 @@ function normalizeManagedLinks(input) {
             linkPath: link.linkPath,
             sourcePath: link.sourcePath,
             ...(identity ? { identity } : {}),
+            ...(link.pending === true ? { pending: true } : {}),
           },
         ],
       ];
@@ -175,14 +171,14 @@ function normalizeConfig(input) {
     });
   }
 
-  // Agent：要求 id、name、directory 均非空且 id 唯一；目录本身是否可用由后续目录校验负责。
+  // Agent：名称与标识属于共享配置；目录为空表示当前设备尚未配置。
   const agents = [];
   const agentIds = new Set();
   for (const item of Array.isArray(config.agents) ? config.agents : []) {
     const id = String(item?.id || "").trim();
     const name = String(item?.name || "").trim();
     const directory = String(item?.directory || "").trim();
-    if (!id || !name || !directory || agentIds.has(id)) continue;
+    if (!id || !name || !isSafeRecordKey(id) || agentIds.has(id)) continue;
     agentIds.add(id);
     agents.push({
       id,
@@ -235,185 +231,360 @@ function database() {
   return storage;
 }
 
+/** 获取稳定的本机标识，用于隔离不可跨设备复用的链接路径与文件标识。 */
+function nativeId() {
+  const id = window.utools?.getNativeId?.();
+  if (!id) throw new Error("无法获取 uTools 本机 ID，已停止链接操作以保护本地文件");
+  return String(id);
+}
+
+/** 判断值是否为可枚举键值对象（排除 null 与数组）。 */
+function isPlainObject(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+/** 判断字符串能否安全用作普通对象的业务键，避免原型属性污染配置映射。 */
+function isSafeRecordKey(value) {
+  return !["__proto__", "prototype", "constructor"].includes(value);
+}
+
+/** 为配置附加不会写入业务字段的运行期上下文。 */
+function attachRuntime(config, context) {
+  Object.entries(context).forEach(([key, value]) => {
+    Object.defineProperty(config, key, {
+      value,
+      enumerable: false,
+      writable: true,
+    });
+  });
+  return config;
+}
+
 /**
- * 写入完整配置：先规范化，再按 STORAGE_KEYS 逐字段写入 uTools 本地数据库。
- *
- * @param {object} config - 待保存的配置对象
- * @throws {Error} 写入失败时抛出带原因的异常，由调用方决定是否需要回滚链接
+ * 深度校验同步配置与本机链接状态。任何可能改变链接集合的嵌套异常都会进入只读保护，
+ * 绝不再把损坏的数组静默当成空数组执行删除。
  */
-function writeConfig(config) {
+function validateStoredState(stored, deviceState, legacy = false) {
+  const issues = [];
+  let locked = false;
+  const fail = (message) => {
+    locked = true;
+    issues.push(
+      createIssue(
+        "error",
+        `${message}，已进入只读保护。可在设置页清除数据后重新配置。`,
+      ),
+    );
+  };
+
+  if (!isPlainObject(stored)) fail("本地数据库主配置不是有效对象");
+  if (!legacy && stored?.version !== CONFIG_VERSION)
+    fail(`不支持的配置版本“${String(stored?.version)}”`);
+  if (!legacy && !isPlainObject(stored?.deviceStates))
+    fail("设备状态分区格式异常");
+  if (typeof stored?.repositoryPath !== "string") fail("Skills 仓库路径格式异常");
+  if (!Array.isArray(stored?.groups)) fail("分组数据格式异常");
+  if (!Array.isArray(stored?.agents)) fail("Agent 数据格式异常");
+  if (!isPlainObject(stored?.enabledGroups)) fail("应用配置格式异常");
+
+  const groupIds = new Set();
+  if (Array.isArray(stored?.groups)) {
+    stored.groups.forEach((group) => {
+      if (
+        !isPlainObject(group) ||
+        typeof group.id !== "string" ||
+        !group.id.trim() ||
+        typeof group.name !== "string" ||
+        !group.name.trim() ||
+        !Array.isArray(group.skillIds) ||
+        group.skillIds.some((id) => typeof id !== "string") ||
+        groupIds.has(group.id)
+      ) {
+        fail("分组中存在无效字段、重复标识或非数组的 skillIds");
+      } else groupIds.add(group.id);
+    });
+  }
+
+  const agentIds = new Set();
+  if (Array.isArray(stored?.agents)) {
+    stored.agents.forEach((agent) => {
+      if (
+        !isPlainObject(agent) ||
+        typeof agent.id !== "string" ||
+        !agent.id.trim() ||
+        !isSafeRecordKey(agent.id) ||
+        typeof agent.name !== "string" ||
+        !agent.name.trim() ||
+        typeof agent.directory !== "string" ||
+        agentIds.has(agent.id)
+      ) {
+        fail("Agent 中存在无效字段或重复标识");
+      } else agentIds.add(agent.id);
+    });
+  }
+
+  if (isPlainObject(stored?.enabledGroups)) {
+    agentIds.forEach((agentId) => {
+      if (!Array.isArray(stored.enabledGroups[agentId]))
+        fail(`Agent“${agentId}”缺少有效的启用分组数组`);
+    });
+    Object.entries(stored.enabledGroups).forEach(([agentId, groupIdsValue]) => {
+      if (
+        !agentIds.has(agentId) ||
+        !Array.isArray(groupIdsValue) ||
+        groupIdsValue.some(
+          (id) => typeof id !== "string" || !groupIds.has(id),
+        )
+      ) {
+        fail(`Agent“${agentId}”的启用分组数据无效`);
+      }
+    });
+  }
+
+  if (!isPlainObject(deviceState) || !isPlainObject(deviceState.agents)) {
+    fail("本机链接状态格式异常");
+  } else {
+    if (typeof deviceState.repositoryPath !== "string") {
+      fail("本机 Skills 仓库路径格式异常");
+    }
+    const localDirectories = [];
+    Object.entries(deviceState.agents).forEach(([agentId, localAgent]) => {
+      if (
+        !isSafeRecordKey(agentId) ||
+        !isPlainObject(localAgent) ||
+        typeof localAgent.directory !== "string" ||
+        !localAgent.directory.trim() ||
+        !isPlainObject(localAgent.managedLinks)
+      )
+        fail(`Agent“${agentId}”的本机链接记录无效`);
+      else if (
+        Object.keys(normalizeManagedLinks(localAgent.managedLinks)).length !==
+        Object.keys(localAgent.managedLinks).length
+      ) {
+        fail(`Agent“${agentId}”包含无法识别的受管链接记录`);
+      } else if (
+        Object.values(localAgent.managedLinks).some(
+          (link) =>
+            (link.pending !== undefined && link.pending !== true) ||
+            (link.identity &&
+              (!Number.isFinite(Number(link.identity.dev)) ||
+                !Number.isFinite(Number(link.identity.ino)) ||
+                !Number.isFinite(Number(link.identity.birthtimeMs)))),
+        )
+      ) {
+        fail(`Agent“${agentId}”包含无效的链接文件标识`);
+      }
+      if (
+        typeof localAgent?.directory === "string" &&
+        localAgent.directory.trim()
+      ) {
+        if (
+          localDirectories.some((directory) =>
+            pathsEqual(directory, localAgent.directory),
+          )
+        )
+          fail(`多个本机 Agent 指向同一个 Skills 目录：${localAgent.directory}`);
+        else localDirectories.push(localAgent.directory);
+      }
+    });
+  }
+
+  if (stored?.theme !== "light" && stored?.theme !== "dark") {
+    issues.push(createIssue("warning", "本地数据库中的主题值无效，已恢复为浅色主题。"));
+  }
+  return { issues: uniqueIssues(issues), locked };
+}
+
+/** 读取旧版 dbStorage 多键配置，仅用于一次性迁移当前开发数据。 */
+function readLegacyConfig(storage) {
+  const stored = {};
+  Object.entries(LEGACY_STORAGE_KEYS).forEach(([field, key]) => {
+    stored[field] = storage.getItem(key);
+  });
+  return Object.values(stored).some((value) => value != null) ? stored : null;
+}
+
+/** 把内存配置转换为单文档结构，并只更新当前设备的本地状态分区。 */
+function buildStoredState(
+  config,
+  latestDeviceStates = config._deviceStates || {},
+) {
   const normalized = normalizeConfig(config);
+  const deviceId = config._deviceId || nativeId();
+  const deviceStates = { ...latestDeviceStates };
+  const localAgents = {};
+  [...normalized.agents, ...(config._orphanAgents || [])].forEach((agent) => {
+    // 空目录表示该 Agent 尚未在当前设备配置，不生成本机记录。
+    if (!agent.directory) return;
+    localAgents[agent.id] = {
+      name: agent.name,
+      directory: agent.directory,
+      managedLinks: normalizeManagedLinks(agent.managedLinks),
+    };
+  });
+  if (Object.keys(localAgents).length || normalized.repositoryPath) {
+    deviceStates[deviceId] = {
+      repositoryPath: normalized.repositoryPath,
+      agents: localAgents,
+    };
+  } else delete deviceStates[deviceId];
+
+  return {
+    version: CONFIG_VERSION,
+    // 路径不可跨设备复用；共享层只保留字段骨架，真实值位于 deviceStates。
+    repositoryPath: "",
+    groups: normalized.groups,
+    agents: normalized.agents.map(({ id, name }) => ({
+      id,
+      name,
+      directory: "",
+    })),
+    enabledGroups: normalized.enabledGroups,
+    theme: normalized.theme,
+    deviceStates,
+  };
+}
+
+/** 单次原子写入全部配置，避免多键循环写入产生部分成功。 */
+function writeConfig(config) {
   try {
     const storage = database();
-    // 一个字段对应一个 dbStorage 键，读取时按同样的映射还原。
-    Object.entries(STORAGE_KEYS).forEach(([field, key]) =>
-      storage.setItem(key, normalized[field]),
-    );
+    // 写入前重新读取最新设备分区，避免本设备用旧快照覆盖其他设备刚保存的本地记录。
+    const latest = storage.getItem(STATE_KEY);
+    const latestDeviceStates =
+      latest?.version === CONFIG_VERSION && isPlainObject(latest.deviceStates)
+        ? latest.deviceStates
+        : config._deviceStates || {};
+    storage.setItem(STATE_KEY, buildStoredState(config, latestDeviceStates));
   } catch (error) {
     throw new Error(`保存本地数据库失败：${errorMessage(error)}`);
   }
 }
 
-/**
- * 读取并校验完整配置。
- *
- * 校验策略：
- *  - 所有键都为空 → 视为首次使用，返回默认配置；
- *  - 关键字段缺失/结构异常，且已存在分组、Agent 或启用关系数据 → 标记 _syncLocked 进入只读保护；
- *  - 非关键异常（如无效主题值）只记录问题，不影响读写。
- *
- * @returns {object} 规范化后的配置；另带两个不可枚举属性：
- *                  _issues（读取过程中发现的问题列表）、_syncLocked（是否只读保护）
- * @throws {Error} 读取数据库本身失败时抛出
- */
+/** 读取单文档配置，并把当前设备的路径与链接记录合并到内存 Agent。 */
 function readConfig() {
   try {
     const storage = database();
-    const stored = {};
-    Object.entries(STORAGE_KEYS).forEach(([field, key]) => {
-      stored[field] = storage.getItem(key);
-    });
-    // 所有键都为 null/undefined 表示数据库里没有本插件的任何数据。
-    const hasDatabaseData = Object.values(stored).some(
-      (value) => value !== null && value !== undefined,
+    const deviceId = nativeId();
+    let stored = storage.getItem(STATE_KEY);
+    let legacy = false;
+    if (stored == null) {
+      stored = readLegacyConfig(storage);
+      legacy = Boolean(stored);
+    }
+    if (!stored) {
+      return attachRuntime(createDefaultConfig(), {
+        _issues: [],
+        _syncLocked: false,
+        _deviceId: deviceId,
+        _deviceStates: {},
+        _orphanAgents: [],
+        _storedState: null,
+        _legacy: false,
+      });
+    }
+
+    const deviceStates = isPlainObject(stored.deviceStates)
+      ? stored.deviceStates
+      : {};
+    let deviceState = isPlainObject(deviceStates[deviceId])
+      ? deviceStates[deviceId]
+      : { repositoryPath: "", agents: {} };
+    if (legacy) {
+      deviceState = {
+        repositoryPath: stored.repositoryPath,
+        agents: Object.fromEntries(
+          (Array.isArray(stored.agents) ? stored.agents : []).map((agent) => [
+            String(agent?.id || ""),
+            {
+              name: agent?.name,
+              directory: agent?.directory,
+              managedLinks: agent?.managedLinks || {},
+            },
+          ]),
+        ),
+      };
+    }
+
+    const validation = validateStoredState(stored, deviceState, legacy);
+    const localAgentRecords = isPlainObject(deviceState.agents)
+      ? deviceState.agents
+      : {};
+    const mergedAgents = (Array.isArray(stored.agents) ? stored.agents : []).map(
+      (agent) => {
+        const local = localAgentRecords[agent.id];
+        return {
+          ...agent,
+          directory:
+            typeof local?.directory === "string"
+              ? local.directory
+              : legacy
+                ? agent.directory
+                : "",
+          managedLinks: local?.managedLinks || agent.managedLinks || {},
+        };
+      },
     );
-    if (!hasDatabaseData) return createDefaultConfig();
-    const issues = [];
-    // 缺失字段：用于提示用户，并参与「是否需要只读保护」的判断。
-    const missingFields = Object.keys(STORAGE_KEYS).filter(
-      (field) => stored[field] === null || stored[field] === undefined,
-    );
-    // 是否已存在与链接相关的数据：只有存在依赖数据时，关键字段缺失才是危险的。
-    const hasDependentData =
-      (Array.isArray(stored.groups) && stored.groups.length > 0) ||
-      (Array.isArray(stored.agents) && stored.agents.length > 0) ||
-      (stored.enabledGroups &&
-        typeof stored.enabledGroups === "object" &&
-        Object.keys(stored.enabledGroups).length > 0);
-    // 关键字段缺失且已有依赖数据 → 只读保护，避免用兜底空值清空真实链接。
-    const criticalMissing = missingFields.some((field) =>
-      ["repositoryPath", "groups", "agents", "enabledGroups"].includes(field),
-    );
-    let syncLocked = criticalMissing && hasDependentData;
-    if (missingFields.length)
-      issues.push(
-        createIssue(
-          "warning",
-          `本地数据库配置不完整，缺失项已使用默认值：${missingFields.join("、")}`,
-        ),
-      );
-    // 分组结构不是数组：配置已不可信，进入只读保护（只观察、不改动磁盘）。
-    if (stored.groups != null && !Array.isArray(stored.groups)) {
-      syncLocked = true;
-      issues.push(
-        createIssue(
-          "error",
-          "本地数据库中的分组数据格式异常，已进入只读保护。可在设置页清除数据后重新配置。",
-        ),
-      );
-    }
-    // Agent 结构不是数组：同上，避免因解析失败误判「所有 Agent 都被删除」而清理链接。
-    if (stored.agents != null && !Array.isArray(stored.agents)) {
-      syncLocked = true;
-      issues.push(
-        createIssue(
-          "error",
-          "本地数据库中的 Agent 数据格式异常，已进入只读保护。可在设置页清除数据后重新配置。",
-        ),
-      );
-    }
-    // 启用关系不是普通对象（数组或原始值）：同样进入只读保护。
-    if (
-      stored.enabledGroups != null &&
-      (typeof stored.enabledGroups !== "object" ||
-        Array.isArray(stored.enabledGroups))
-    ) {
-      syncLocked = true;
-      issues.push(
-        createIssue(
-          "error",
-          "本地数据库中的应用配置格式异常，已进入只读保护。可在设置页清除数据后重新配置。",
-        ),
-      );
-    }
-    const config = normalizeConfig(stored);
-    // 规范化时丢弃了记录 → 说明存在无效或重复数据，提示用户但不阻断使用。
-    if (
-      Array.isArray(stored.groups) &&
-      config.groups.length !== stored.groups.length
-    ) {
-      issues.push(
-        createIssue("warning", "部分分组记录无效或标识重复，已忽略异常记录。"),
-      );
-    }
-    // Agent 记录被丢弃的提示（同样只提示，不影响后续同步）。
-    if (
-      Array.isArray(stored.agents) &&
-      config.agents.length !== stored.agents.length
-    ) {
-      issues.push(
-        createIssue(
-          "warning",
-          "部分 Agent 记录无效或标识重复，已忽略异常记录。",
-        ),
-      );
-    }
-    // 仓库路径类型异常：不能猜测用户意图，进入只读保护。
-    if (
-      stored.repositoryPath != null &&
-      typeof stored.repositoryPath !== "string"
-    ) {
-      syncLocked = true;
-      issues.push(
-        createIssue(
-          "error",
-          "本地数据库中的仓库路径格式异常，已进入只读保护。可在设置页清除数据后重新配置。",
-        ),
-      );
-    }
-    // 主题值非法：可直接回退为浅色，属于可自愈的轻微问题。
-    if (
-      stored.theme != null &&
-      stored.theme !== "light" &&
-      stored.theme !== "dark"
-    ) {
-      issues.push(
-        createIssue("warning", "本地数据库中的主题值无效，已恢复为浅色主题。"),
-      );
-    }
-    // 用不可枚举属性携带诊断信息：既不影响 JSON 序列化，也不会写回数据库。
-    Object.defineProperty(config, "_issues", {
-      value: issues,
-      enumerable: false,
+    const config = normalizeConfig({
+      ...stored,
+      repositoryPath:
+        typeof deviceState.repositoryPath === "string"
+          ? deviceState.repositoryPath
+          : legacy
+            ? stored.repositoryPath
+            : "",
+      agents: mergedAgents,
     });
-    Object.defineProperty(config, "_syncLocked", {
-      value: syncLocked,
-      enumerable: false,
+    const currentIds = new Set(config.agents.map((agent) => agent.id));
+    const orphanAgents = Object.entries(localAgentRecords)
+      .filter(([agentId]) => !currentIds.has(agentId))
+      .map(([id, agent]) => ({
+        id,
+        name: agent.name || id,
+        directory: agent.directory || "",
+        managedLinks: normalizeManagedLinks(agent.managedLinks),
+      }))
+      .filter((agent) => agent.directory);
+    if (legacy && !validation.locked)
+      validation.issues.push(
+        createIssue(
+          "info",
+          "旧版数据库配置已载入，本次刷新会转换为设备隔离的单文档结构。",
+        ),
+      );
+    return attachRuntime(config, {
+      _issues: uniqueIssues(validation.issues),
+      _syncLocked: validation.locked,
+      _deviceId: deviceId,
+      _deviceStates: deviceStates,
+      _orphanAgents: orphanAgents,
+      _storedState: stored,
+      _legacy: legacy,
     });
-    return config;
   } catch (error) {
     throw new Error(`读取本地数据库失败：${errorMessage(error)}`);
   }
 }
 
-/**
- * 删除本地数据库中的全部插件配置键。
- * 单个键删除失败不影响其他键，最后统一汇总失败项。
- *
- * @throws {Error} 存在删除失败的键时抛出（附带键名与原因）
- */
-function clearStoredConfig() {
-  const failures = [];
-  const storage = database();
-  Object.values(STORAGE_KEYS).forEach((key) => {
-    try {
-      storage.removeItem(key);
-    } catch (error) {
-      failures.push(`${key}（${errorMessage(error)}）`);
-    }
-  });
-  if (failures.length)
-    throw new Error(`清除本地数据库失败：${failures.join("；")}`);
+/** 清除共享配置与当前设备状态；其他设备状态保留到对应设备下次启动后安全回收。 */
+function clearStoredConfig(config) {
+  try {
+    const storage = database();
+    const latest = storage.getItem(STATE_KEY);
+    const deviceStates = {
+      ...(latest?.version === CONFIG_VERSION &&
+      isPlainObject(latest.deviceStates)
+        ? latest.deviceStates
+        : config._deviceStates || {}),
+    };
+    delete deviceStates[config._deviceId || nativeId()];
+    if (Object.keys(deviceStates).length) {
+      storage.setItem(STATE_KEY, { ...createDefaultConfig(), deviceStates });
+    } else storage.removeItem(STATE_KEY);
+    Object.values(LEGACY_STORAGE_KEYS).forEach((key) => storage.removeItem(key));
+  } catch (error) {
+    throw new Error(`清除本地数据库失败：${errorMessage(error)}`);
+  }
 }
 
 // ============================================================================
@@ -533,11 +704,20 @@ function assertSafeAgentDirectory(config, directory, currentAgentId = "") {
   // 同一目录被两个 Agent 使用会导致链接被互相删除，必须禁止。
   const duplicate = config.agents.find(
     (agent) =>
-      agent.id !== currentAgentId && pathsEqual(agent.directory, directory),
+      agent.id !== currentAgentId &&
+      agent.directory &&
+      pathsEqual(agent.directory, directory),
   );
   if (duplicate)
     throw new Error(
       `该 Skills 目录已由 Agent“${duplicate.name}”使用，请选择其他目录`,
+    );
+  const pendingCleanup = (config._orphanAgents || []).find(
+    (agent) => agent.directory && pathsEqual(agent.directory, directory),
+  );
+  if (pendingCleanup)
+    throw new Error(
+      `该目录仍有 Agent“${pendingCleanup.name}”的受管链接等待清理，请处理相关错误后刷新再试`,
     );
 }
 
@@ -550,14 +730,18 @@ function assertSafeAgentDirectory(config, directory, currentAgentId = "") {
  * 支持单引号、双引号与裸值三种写法，并允许行尾注释。
  *
  * @param {string} skillFile - SKILL.md 的绝对路径
- * @returns {{name: string, error: string}} 成功时返回 name 且 error 为空；失败时 name 为空并给出原因
+ * @returns {{name: string, error: string, incomplete?: boolean}} incomplete 表示文件暂时无法读取，不能据此清理 Skill
  */
 function readSkillNameDetailed(skillFile) {
   let content;
   try {
     content = fs.readFileSync(skillFile, "utf8");
   } catch (error) {
-    return { name: "", error: `无法读取 ${skillFile}：${errorMessage(error)}` };
+    return {
+      name: "",
+      error: `无法读取 ${skillFile}：${errorMessage(error)}`,
+      incomplete: true,
+    };
   }
   // 匹配文件开头的 YAML frontmatter（--- ... ---），兼容 BOM 与 CRLF 换行。
   const frontmatter = content.match(
@@ -660,8 +844,15 @@ function scanSkills(repositoryPath) {
         });
         return;
       }
+      // 文件系统读取失败与元数据格式错误语义不同：前者不能证明 Skill 已被删除。
+      if (result.incomplete) complete = false;
       // 有 SKILL.md 但元数据非法：忽略该目录并提示，继续向下查找子目录。
-      issues.push(createIssue("warning", `${result.error}，该目录已忽略。`));
+      issues.push(
+        createIssue(
+          result.incomplete ? "error" : "warning",
+          `${result.error}，该目录已忽略。${result.incomplete ? "为防止误删，本次不会清理缺失项。" : ""}`,
+        ),
+      );
     }
     // 继续遍历子目录：跳过符号链接（防止循环）、node_modules 与 .git*。
     for (const entry of entries) {
@@ -807,7 +998,7 @@ function identitiesEqual(stored, current) {
  * @returns {boolean} 是否为直接子项
  */
 function isDirectChild(parent, child) {
-  return comparablePath(path.dirname(child)) === comparablePath(parent);
+  return pathsEqual(path.dirname(child), parent);
 }
 
 /**
@@ -816,7 +1007,7 @@ function isDirectChild(parent, child) {
  * 移除条件（必须全部满足）：路径位于允许目录内、仍是符号链接、目标未变、文件标识一致。
  * 任一条件不满足都只提示不删除，并把 relinquished 置为 true（表示放弃管理该记录）。
  *
- * @param {{linkPath: string, sourcePath: string, identity?: object}} link - 受管链接记录
+ * @param {{linkPath: string, sourcePath: string, identity?: object, pending?: boolean}} link - 受管链接记录
  * @param {string} label - 用于提示文案的名称
  * @param {string} [allowedDirectory] - 允许删除的目录（通常是 Agent 目录）
  * @returns {{removed: boolean, relinquished: boolean, issues: Array}} removed 是否已删除；
@@ -1020,6 +1211,18 @@ function syncAgent(config, agent, scan) {
   // 本次新建的链接记录，数据库保存失败时用于回滚。
   const createdLinks = [];
 
+  // 同步配置可能先于本机路径同步到新设备；未配置目录时保持只读，不猜测其他设备的路径。
+  if (!agent.directory) {
+    issues.push(
+      createIssue(
+        "warning",
+        `Agent“${agent.name}”尚未在当前设备配置 Skills 目录，已跳过链接同步。`,
+      ),
+    );
+    agent.managedLinks = previousLinks;
+    return { linked, external, createdLinks, issues };
+  }
+
   let targetUsable = true;
   try {
     const stat = fs.statSync(agent.directory);
@@ -1091,7 +1294,14 @@ function syncAgent(config, agent, scan) {
       stillOwned &&
       pathsEqual(link.sourcePath, currentSource)
     ) {
-      nextLinks[skillId] = link;
+      // “待创建”记录说明上次可能在创建后中断；确认链接存在后补齐身份并转为正式记录。
+      nextLinks[skillId] = link.pending
+        ? {
+            linkPath: link.linkPath,
+            sourcePath: link.sourcePath,
+            identity: inspected.identity,
+          }
+        : link;
       linked.push(skillId);
       return;
     }
@@ -1167,6 +1377,25 @@ function syncAgent(config, agent, scan) {
       return;
     }
     try {
+      // 两阶段落库：先登记待创建链接，再触碰文件系统，保证异常退出后仍能追踪归属。
+      nextLinks[skill.id] = {
+        linkPath,
+        sourcePath: skill.sourcePath,
+        pending: true,
+      };
+      agent.managedLinks = nextLinks;
+      try {
+        writeConfig(config);
+      } catch (error) {
+        delete nextLinks[skill.id];
+        issues.push(
+          createIssue(
+            "error",
+            `创建“${skill.name}”链接前无法保存安全检查点：${error.message}。未创建该链接。`,
+          ),
+        );
+        return;
+      }
       // Windows 使用 junction（目录联接，无需管理员权限），其他平台使用目录符号链接。
       fs.symlinkSync(
         skill.sourcePath,
@@ -1196,9 +1425,11 @@ function syncAgent(config, agent, scan) {
         sourcePath: skill.sourcePath,
         ...(identity ? { identity } : {}),
       };
-      createdLinks.push(nextLinks[skill.id]);
+      createdLinks.push({ skillId: skill.id, ...nextLinks[skill.id] });
       linked.push(skill.id);
     } catch (error) {
+      // 创建失败时从内存移除待创建项；数据库中的检查点会由最终写入清理。
+      delete nextLinks[skill.id];
       // 创建失败（权限、占用等）：提示并继续处理其他 Skill。
       issues.push(
         createIssue(
@@ -1340,43 +1571,67 @@ function buildState(
 }
 
 /**
- * 刷新状态的核心流程：扫描仓库 → 清理失效引用 → 同步所有 Agent → 保存配置 → 组装状态。
+ * 刷新状态的核心流程：扫描仓库 → 写入恢复检查点 → 同步所有 Agent → 保存结果 → 组装状态。
  *
- * 关键点：所有文件操作完成后统一写数据库；写入失败时回滚本轮新建的链接，
- * 保证不会留下「磁盘上有链接、数据库里没记录」的孤立链接。
+ * 关键点：文件操作前先持久化业务目标与旧链接记录；最终写入失败时回滚本轮新建链接，
+ * 删除结果则可依据检查点在下次启动时安全收敛。
  *
  * @param {object} config - 已读取（可能已修改）的配置对象
  * @returns {object} 前端可用的完整状态
- * @throws {Error} 配置只读保护以外的数据库写入失败，或写入失败且回滚不完整
+ * @throws {Error} 恢复检查点无法写入时抛出，且不会执行任何文件操作
  */
 function refreshState(config) {
   const scan = scanConfiguredRepository(config);
   const reconciledIssues = reconcileDeletedSkills(config, scan);
+  // 只读保护时只观察链接；正常状态先保存恢复检查点，再开始文件系统变更。
+  if (!config._syncLocked) writeConfig(config);
+  const orphanIssues = config._syncLocked ? [] : cleanupOrphanAgents(config);
   const syncResults = syncAllAgents(config, scan);
-  // 只读保护时绝不写库（配置可能已被异常数据污染）。
+  const persistenceIssues = [];
   if (!config._syncLocked) {
     try {
       writeConfig(config);
     } catch (error) {
-      // 数据库保存失败时回滚本轮新建链接，避免产生没有持久记录的孤立链接。
+      // 检查点已包含业务目标和旧链接记录；这里只回滚未持久化的新链接，删除项可在下次启动自愈。
       const rollbackIssues = [];
       config.agents.forEach((agent) => {
         const createdLinks = syncResults[agent.id]?.createdLinks || [];
         createdLinks.forEach((link) => {
-          rollbackIssues.push(
-            ...removeOwnedLink(
-              link,
-              `保存失败后的新建链接 ${link.linkPath}`,
-              agent.directory,
-            ).issues,
+          const removal = removeOwnedLink(
+            link,
+            `保存失败后的新建链接 ${link.linkPath}`,
+            agent.directory,
           );
+          rollbackIssues.push(...removal.issues);
+          if (removal.relinquished) {
+            delete agent.managedLinks[link.skillId];
+            const syncResult = syncResults[agent.id];
+            syncResult.linked = syncResult.linked.filter(
+              (id) => id !== link.skillId,
+            );
+          }
         });
       });
-      // 回滚失败时把失败原因追加到异常信息中，便于用户手工处理。
-      const detail = rollbackIssues.length
-        ? `；部分链接回滚失败：${rollbackIssues.map((issue) => issue.message).join("；")}`
-        : "；本轮新建链接已回滚";
-      throw new Error(`${error.message}${detail}`);
+      // 回滚后再尝试一次最终保存；成功则数据库与当前磁盘已经重新一致。
+      try {
+        writeConfig(config);
+        const detail = rollbackIssues.length
+          ? `部分新建链接未能回滚，但其受管记录已保留：${rollbackIssues.map((issue) => issue.message).join("；")}`
+          : "本轮新建链接已回滚，数据库重试保存成功";
+        persistenceIssues.push(
+          createIssue("warning", `${error.message}；${detail}。`),
+        );
+      } catch (retryError) {
+        const detail = rollbackIssues.length
+          ? `；新建链接回滚存在问题：${rollbackIssues.map((issue) => issue.message).join("；")}`
+          : "；本轮新建链接已回滚，其余状态将在下次启动时按安全检查点自动收敛";
+        persistenceIssues.push(
+          createIssue(
+            "error",
+            `${error.message}；重试保存仍失败：${retryError.message}${detail}`,
+          ),
+        );
+      }
     }
   }
   return buildState(
@@ -1386,6 +1641,8 @@ function refreshState(config) {
     collectIssues(scan, syncResults, [
       ...(config._issues || []),
       ...reconciledIssues,
+      ...orphanIssues,
+      ...persistenceIssues,
     ]),
   );
 }
@@ -1415,20 +1672,17 @@ function cleanupAgentLinks(agent) {
   return uniqueIssues(issues);
 }
 
-/**
- * 若清理过程中存在 error 级问题，则抛出异常阻止后续步骤（例如删除配置记录）。
- * 这样可避免「链接没删干净，但数据库记录已经没了」导致链接再也无法追踪。
- *
- * @param {Array} issues - 问题列表
- * @param {string} action - 操作名称，用于错误提示
- * @throws {Error} 存在 error 级问题时抛出
- */
-function throwIfCleanupFailed(issues, action) {
-  const failures = issues.filter((issue) => issue.type === "error");
-  if (failures.length)
-    throw new Error(
-      `${action}未完成：${failures.map((issue) => issue.message).join("；")}`,
-    );
+/** 清理当前设备上已经不属于共享配置的 Agent 链接，并保留失败项供下次重试。 */
+function cleanupOrphanAgents(config) {
+  const issues = [];
+  const remaining = [];
+  (config._orphanAgents || []).forEach((agent) => {
+    const agentIssues = cleanupAgentLinks(agent);
+    issues.push(...agentIssues);
+    if (Object.keys(agent.managedLinks || {}).length) remaining.push(agent);
+  });
+  config._orphanAgents = remaining;
+  return uniqueIssues(issues);
 }
 
 /**
@@ -1493,11 +1747,21 @@ window.skillsManager = {
   setTheme(theme) {
     const config = readConfig();
     config.theme = theme === "dark" ? "dark" : "light";
-    try {
-      database().setItem(STORAGE_KEYS.theme, config.theme);
-    } catch (error) {
-      throw new Error(`保存主题失败：${errorMessage(error)}`);
-    }
+    // 只读保护时不能用规范化后的配置覆盖损坏原文档，但主题仍可独立更新。
+    if (config._syncLocked) {
+      if (config._legacy || !isPlainObject(config._storedState))
+        throw new Error(
+          "本地数据库处于只读保护，暂时无法保存主题。请先在设置页清除数据。",
+        );
+      try {
+        database().setItem(STATE_KEY, {
+          ...config._storedState,
+          theme: config.theme,
+        });
+      } catch (error) {
+        throw new Error(`保存主题失败：${errorMessage(error)}`);
+      }
+    } else writeConfig(config);
     return { theme: config.theme, issues: config._issues || [] };
   },
 
@@ -1518,8 +1782,9 @@ window.skillsManager = {
     // 仓库与 Agent 目录互相包含会导致扫描结果污染（把自己的链接当成 Skill）。
     const nestedAgent = config.agents.find(
       (agent) =>
-        isInsideDirectory(normalizedPath, agent.directory) ||
-        isInsideDirectory(agent.directory, normalizedPath),
+        agent.directory &&
+        (isInsideDirectory(normalizedPath, agent.directory) ||
+          isInsideDirectory(agent.directory, normalizedPath)),
     );
     if (nestedAgent)
       throw new Error(
@@ -1602,14 +1867,18 @@ window.skillsManager = {
     const id = input?.id
       ? String(input.id)
       : `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    if (!isSafeRecordKey(id)) throw new Error("Agent 标识无效，请重新创建 Agent");
     assertSafeAgentDirectory(config, directory, id);
     const existing = config.agents.find((agent) => agent.id === id);
-    const cleanupIssues = [];
     if (existing) {
-      // 目录变更：先清理旧目录中的受管链接，失败则中止（避免残留链接失去记录）。
-      if (!pathsEqual(existing.directory, directory)) {
-        cleanupIssues.push(...cleanupAgentLinks(existing));
-        throwIfCleanupFailed(cleanupIssues, "更换 Agent 目录");
+      // 目录变更：旧目录记录转为设备级待清理项，refreshState 保存检查点后再安全清理。
+      if (existing.directory && !pathsEqual(existing.directory, directory)) {
+        config._orphanAgents.push({
+          id: `${existing.id}:moved:${Date.now()}`,
+          name: existing.name,
+          directory: existing.directory,
+          managedLinks: normalizeManagedLinks(existing.managedLinks),
+        });
         existing.managedLinks = {};
       }
       existing.name = name;
@@ -1619,18 +1888,15 @@ window.skillsManager = {
       config.agents.push({ id, name, directory, managedLinks: {} });
       config.enabledGroups[id] = [];
     }
-    const state = refreshState(config);
-    // 把目录变更时的清理问题合并到返回结果中。
-    state.issues = uniqueIssues([...cleanupIssues, ...state.issues]);
-    return state;
+    return refreshState(config);
   },
 
   /**
-   * 删除 Agent：先安全清理其目录下的受管链接，全部成功后才删除数据库记录。
+   * 删除 Agent：先保存删除目标，再安全清理受管链接；失败记录会留在本机分区供下次重试。
    *
    * @param {string} agentId - 目标 Agent id
    * @returns {object} 刷新后的完整状态（issues 中附加了清理问题）
-   * @throws {Error} Agent 不存在、清理未完成或处于只读保护
+   * @throws {Error} Agent 不存在、检查点保存失败或处于只读保护
    */
   deleteAgent(agentId) {
     const config = readConfig();
@@ -1638,41 +1904,54 @@ window.skillsManager = {
     const agent = config.agents.find((item) => item.id === agentId);
     if (!agent)
       throw new Error("未找到要删除的 Agent，配置可能已被其他窗口更新");
-    const issues = cleanupAgentLinks(agent);
-    // 有链接未能安全删除时中止删除，保证记录与磁盘状态一致。
-    throwIfCleanupFailed(issues, "删除 Agent");
+    // 先把本机记录转成待清理项，确保数据库检查点写入成功后才会触碰文件系统。
+    config._orphanAgents.push({
+      ...agent,
+      managedLinks: normalizeManagedLinks(agent.managedLinks),
+    });
     config.agents = config.agents.filter((item) => item.id !== agentId);
     // 同步删除该 Agent 的启用分组记录。
     delete config.enabledGroups[agentId];
     const state = refreshState(config);
-    state.issues = uniqueIssues([...issues, ...state.issues]);
     return state;
   },
 
   /**
-   * 清除全部本地数据：先清理所有受管链接，再删除数据库中的配置键。
+   * 清除全部数据：先保存清空目标，再清理当前设备的受管链接并删除共享配置。
    * 仓库中的源文件与用户手动创建的内容都不会被删除。
    *
    * @returns {object} 默认配置对应的空状态（附带清理过程中的问题）
-   * @throws {Error} 链接清理未完成或数据库删除失败
+   * @throws {Error} 安全检查点或数据库清除失败
    */
-  // 只有受管链接全部完成安全清理后才删除数据库记录，避免遗留无法追踪的链接。
+  // 未清理完成的链接继续保留设备级记录，避免产生无法追踪的链接。
   clearData() {
     const config = readConfig();
-    // 逐个 Agent 清理受管链接。
-    const issues = config.agents.flatMap(cleanupAgentLinks);
-    throwIfCleanupFailed(issues, "清除数据");
-    // 处于只读保护时，只能清理仍然可识别的链接，提示用户其余内容已保留。
+    const cleared = attachRuntime(createDefaultConfig(), {
+      _issues: [],
+      _syncLocked: false,
+      _deviceId: config._deviceId,
+      _deviceStates: config._deviceStates,
+      _orphanAgents: [...config.agents, ...(config._orphanAgents || [])],
+    });
+    // 先用单文档写入“共享配置已清空 + 本机待清理记录”的检查点。
+    writeConfig(cleared);
+    const issues = cleanupOrphanAgents(cleared);
     if (config._syncLocked) {
       issues.push(
         createIssue(
           "warning",
-          "数据库配置异常，仅清理了仍可识别的受管链接；无法识别的现有文件和链接均已保留。",
+          "数据库配置异常，仅清理了仍可识别的本机受管链接；其他内容均已保留。",
         ),
       );
     }
-    clearStoredConfig();
-    return buildState(createDefaultConfig(), { skills: [] }, {}, issues);
+    if (cleared._orphanAgents.length) writeConfig(cleared);
+    else clearStoredConfig(cleared);
+    return buildState(
+      createDefaultConfig(),
+      { skills: [] },
+      {},
+      uniqueIssues(issues),
+    );
   },
 
   /**

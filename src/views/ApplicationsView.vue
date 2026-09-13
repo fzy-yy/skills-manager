@@ -42,15 +42,8 @@ const selectedAgent = computed(() =>
 const activeGroups = computed(
   () => store.enabledGroups[selectedAgentId.value] || [],
 );
-// 派生：已启用分组去重后的 Skills 数量（同一 Skill 属于多个分组时只计一次）。
-const enabledSkillCount = computed(() => {
-  const ids = new Set();
-  store.groups.forEach((group) => {
-    if (activeGroups.value.includes(group.id))
-      group.skillIds.forEach((id) => ids.add(id));
-  });
-  return ids.size;
-});
+// 使用服务端核验后的实际链接数量，冲突或创建失败的 Skill 不会被误计为已链接。
+const actualLinkedCount = computed(() => selectedAgent.value?.linkedCount || 0);
 
 // Agent 列表发生变化时保证选择值始终有效。
 // immediate 让首次进入页面时自动选中第一个 Agent；deep 保证重命名等改动也能触发校验。
@@ -119,7 +112,7 @@ async function setGroup(groupId, enabled) {
           >
           <span
             ><strong class="mr-1 text-lg text-primary">{{
-              enabledSkillCount
+              actualLinkedCount
             }}</strong
             >个 Skills 已链接</span
           >
@@ -129,7 +122,7 @@ async function setGroup(groupId, enabled) {
           v-if="selectedAgent"
           class="col-span-2 m-0 truncate pl-6.5 font-mono text-xs text-ink-muted"
         >
-          {{ selectedAgent.directory }}
+          {{ selectedAgent.directory || "当前设备尚未配置 Skills 目录" }}
         </p>
       </div>
 
