@@ -26,8 +26,8 @@ export const useAppStore = defineStore("app", () => {
   const groups = ref([]);
   // Agent 列表；后端返回的是精简后的公开字段（含链接数量统计）。
   const agents = ref([]);
-  // 每个 Agent 已启用的分组：{ [agentId]: groupId[] }。
-  const enabledGroups = ref({});
+  // 每个 Agent 已启用的 Skills：{ [agentId]: skillId[] }，是应用配置的唯一真值。
+  const enabledSkills = ref({});
   // 当前主题，取值 'light' 或 'dark'。
   const theme = ref("light");
   // 是否已完成首次初始化（读取本地配置），用于避免首屏空白闪烁。
@@ -55,10 +55,10 @@ export const useAppStore = defineStore("app", () => {
   // 文件与数据库操作必须串行，避免快速重复点击产生两轮相互覆盖的链接同步。
   let operationInFlight = false;
   // 应用配置开关使用短防抖合并；快速开关回到原状态时不会触碰数据库或链接。
-  const pendingGroupSyncs = new Map();
-  let groupSyncTimer;
-  let groupSyncFlushing = false;
-  const GROUP_SYNC_DEBOUNCE_MS = 300;
+  const pendingSkillSyncs = new Map();
+  let skillSyncTimer;
+  let skillSyncFlushing = false;
+  const SKILL_SYNC_DEBOUNCE_MS = 300;
 
   // ---------- 派生状态 ----------
   // 是否已经配置过统一 Skills 仓库目录。
@@ -88,7 +88,7 @@ export const useAppStore = defineStore("app", () => {
    * 将后端（preload 服务）返回的状态增量合并到本地响应式状态。
    * 未出现在 next 中的字段保持原值不变。
    *
-   * @param {object} next - 形如 { repositoryPath, skills, groups, agents, enabledGroups, theme, issues }
+   * @param {object} next - 形如 { repositoryPath, skills, groups, agents, enabledSkills, theme, issues }
    */
   function applyState(next) {
     // 部分接口（例如主题切换）只返回变更字段，避免无关状态被意外清空。
@@ -100,13 +100,13 @@ export const useAppStore = defineStore("app", () => {
       groups.value = Array.isArray(next.groups) ? next.groups : [];
     if (Object.hasOwn(next, "agents"))
       agents.value = Array.isArray(next.agents) ? next.agents : [];
-    if (Object.hasOwn(next, "enabledGroups")) {
-      const mergedEnabledGroups = { ...(next.enabledGroups || {}) };
+    if (Object.hasOwn(next, "enabledSkills")) {
+      const mergedEnabledSkills = { ...(next.enabledSkills || {}) };
       // 服务端状态回写时保留尚在防抖窗口内的乐观选择，避免开关视觉回跳。
-      pendingGroupSyncs.forEach((pending, agentId) => {
-        mergedEnabledGroups[agentId] = [...pending.groupIds];
+      pendingSkillSyncs.forEach((pending, agentId) => {
+        mergedEnabledSkills[agentId] = [...pending.skillIds];
       });
-      enabledGroups.value = mergedEnabledGroups;
+      enabledSkills.value = mergedEnabledSkills;
     }
     if (Object.hasOwn(next, "theme"))
       theme.value = next.theme === "dark" ? "dark" : "light";
@@ -216,17 +216,17 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // ---------- 应用配置开关合并 ----------
-  /** 规范化分组 id 数组，便于比较最终选择是否真正发生变化。 */
-  function normalizeGroupIds(groupIds) {
+  /** 规范化 Skill id 数组，便于比较最终选择是否真正发生变化。 */
+  function normalizeSkillIds(skillIds) {
     return [
-      ...new Set(Array.isArray(groupIds) ? groupIds.map(String) : []),
+      ...new Set(Array.isArray(skillIds) ? skillIds.map(String) : []),
     ].sort();
   }
 
-  /** 判断两个分组选择是否等价。 */
-  function groupIdsEqual(left, right) {
-    const normalizedLeft = normalizeGroupIds(left);
-    const normalizedRight = normalizeGroupIds(right);
+  /** 判断两个 Skill 选择是否等价。 */
+  function skillIdsEqual(left, right) {
+    const normalizedLeft = normalizeSkillIds(left);
+    const normalizedRight = normalizeSkillIds(right);
     return (
       normalizedLeft.length === normalizedRight.length &&
       normalizedLeft.every((id, index) => id === normalizedRight[index])
@@ -234,93 +234,93 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /** 安排下一次防抖提交；其他业务操作进行中时稍后自动重试。 */
-  function scheduleGroupSync(delay = GROUP_SYNC_DEBOUNCE_MS) {
-    clearTimeout(groupSyncTimer);
-    groupSyncTimer = setTimeout(() => {
-      groupSyncTimer = undefined;
-      void flushPendingGroupSyncs();
+  function scheduleSkillSync(delay = SKILL_SYNC_DEBOUNCE_MS) {
+    clearTimeout(skillSyncTimer);
+    skillSyncTimer = setTimeout(() => {
+      skillSyncTimer = undefined;
+      void flushPendingSkillSyncs();
     }, delay);
   }
 
-  /** 顺序提交各 Agent 的最终分组状态，确保不会与其他文件操作并发。 */
-  async function flushPendingGroupSyncs() {
-    if (!pendingGroupSyncs.size) return;
-    if (groupSyncFlushing || operationInFlight) {
-      scheduleGroupSync(100);
+  /** 顺序提交各 Agent 的最终 Skill 状态，确保不会与其他文件操作并发。 */
+  async function flushPendingSkillSyncs() {
+    if (!pendingSkillSyncs.size) return;
+    if (skillSyncFlushing || operationInFlight) {
+      scheduleSkillSync(100);
       return;
     }
-    const [agentId, pending] = pendingGroupSyncs.entries().next().value;
-    pendingGroupSyncs.delete(agentId);
-    groupSyncFlushing = true;
+    const [agentId, pending] = pendingSkillSyncs.entries().next().value;
+    pendingSkillSyncs.delete(agentId);
+    skillSyncFlushing = true;
     try {
       // 开关属于高频操作：静默处理成功与逐 Skill 检查结果，避免右下角提示堆积。
       // 接口直接抛出的致命错误仍由 execute 统一展示一条错误提示。
       const result = await execute(
-        () => api().setAgentGroups(agentId, pending.groupIds),
+        () => api().setAgentSkills(agentId, pending.skillIds),
         undefined,
         { reportResultIssues: false },
       );
       pending.waiters.forEach(({ resolve }) => resolve(result));
     } catch (error) {
       // 没有更新的同 Agent 请求时才回滚乐观状态，避免覆盖用户刚做出的新选择。
-      if (!pendingGroupSyncs.has(agentId)) {
-        enabledGroups.value = {
-          ...enabledGroups.value,
-          [agentId]: [...pending.baseGroupIds],
+      if (!pendingSkillSyncs.has(agentId)) {
+        enabledSkills.value = {
+          ...enabledSkills.value,
+          [agentId]: [...pending.baseSkillIds],
         };
       }
       pending.waiters.forEach(({ reject }) => reject(error));
     } finally {
-      groupSyncFlushing = false;
-      if (pendingGroupSyncs.size) scheduleGroupSync(0);
+      skillSyncFlushing = false;
+      if (pendingSkillSyncs.size) scheduleSkillSync(0);
     }
   }
 
   /**
-   * 乐观更新开关，并把防抖窗口内的多次切换合并成一次最终提交。
+   * 乐观更新 Skill 集合，并把防抖窗口内的多次切换合并成一次最终提交。
    * 若最终选择回到提交前状态，则直接完成等待，不调用 preload。
    */
-  function setAgentGroupsDebounced(agentId, groupIds) {
-    const normalizedIds = normalizeGroupIds(groupIds);
-    let pending = pendingGroupSyncs.get(agentId);
+  function setAgentSkillsDebounced(agentId, skillIds) {
+    const normalizedIds = normalizeSkillIds(skillIds);
+    let pending = pendingSkillSyncs.get(agentId);
     if (!pending) {
       pending = {
-        baseGroupIds: normalizeGroupIds(enabledGroups.value[agentId]),
-        groupIds: normalizedIds,
+        baseSkillIds: normalizeSkillIds(enabledSkills.value[agentId]),
+        skillIds: normalizedIds,
         waiters: [],
       };
-      pendingGroupSyncs.set(agentId, pending);
-    } else pending.groupIds = normalizedIds;
+      pendingSkillSyncs.set(agentId, pending);
+    } else pending.skillIds = normalizedIds;
 
-    enabledGroups.value = {
-      ...enabledGroups.value,
+    enabledSkills.value = {
+      ...enabledSkills.value,
       [agentId]: [...normalizedIds],
     };
 
     const completion = new Promise((resolve, reject) => {
       pending.waiters.push({ resolve, reject });
     });
-    if (groupIdsEqual(pending.baseGroupIds, normalizedIds)) {
-      pendingGroupSyncs.delete(agentId);
+    if (skillIdsEqual(pending.baseSkillIds, normalizedIds)) {
+      pendingSkillSyncs.delete(agentId);
       pending.waiters.forEach(({ resolve }) => resolve(null));
-      if (!pendingGroupSyncs.size) clearTimeout(groupSyncTimer);
-      else scheduleGroupSync();
-    } else scheduleGroupSync();
+      if (!pendingSkillSyncs.size) clearTimeout(skillSyncTimer);
+      else scheduleSkillSync();
+    } else scheduleSkillSync();
     return completion;
   }
 
   /** 取消指定 Agent 尚未落库的开关请求，用于删除 Agent 前收敛前端状态。 */
-  function cancelPendingAgentGroups(agentId) {
-    const pending = pendingGroupSyncs.get(agentId);
+  function cancelPendingAgentSkills(agentId) {
+    const pending = pendingSkillSyncs.get(agentId);
     if (!pending) return;
-    pendingGroupSyncs.delete(agentId);
+    pendingSkillSyncs.delete(agentId);
     pending.waiters.forEach(({ resolve }) => resolve(null));
-    if (!pendingGroupSyncs.size) clearTimeout(groupSyncTimer);
+    if (!pendingSkillSyncs.size) clearTimeout(skillSyncTimer);
   }
 
   /** 清除所有尚未落库的开关请求，避免清除数据后又被延迟任务恢复。 */
-  function cancelAllPendingAgentGroups() {
-    [...pendingGroupSyncs.keys()].forEach(cancelPendingAgentGroups);
+  function cancelAllPendingAgentSkills() {
+    [...pendingSkillSyncs.keys()].forEach(cancelPendingAgentSkills);
   }
 
   // ---------- 确认对话框 ----------
@@ -441,7 +441,7 @@ export const useAppStore = defineStore("app", () => {
     skills,
     groups,
     agents,
-    enabledGroups,
+    enabledSkills,
     theme,
     ready,
     busy,
@@ -475,7 +475,7 @@ export const useAppStore = defineStore("app", () => {
       ),
     // 删除 Agent，同时清理本应用在其目录创建的链接。
     deleteAgent: (id) => {
-      cancelPendingAgentGroups(id);
+      cancelPendingAgentSkills(id);
       return execute(
         () => api().deleteAgent(id),
         "Agent 已删除，相关链接已清理",
@@ -483,10 +483,10 @@ export const useAppStore = defineStore("app", () => {
     },
     // 清除 uTools 本地数据库配置（保留仓库中的源文件）。
     clearData: () => {
-      cancelAllPendingAgentGroups();
+      cancelAllPendingAgentSkills();
       return execute(() => api().clearData(), "本地数据已清除");
     },
-    // 设置某个 Agent 启用的分组，服务端据此差量创建/移除链接。
-    setAgentGroups: setAgentGroupsDebounced,
+    // 设置某个 Agent 启用的 Skills，分组与单项开关统一复用该入口。
+    setAgentSkills: setAgentSkillsDebounced,
   };
 });

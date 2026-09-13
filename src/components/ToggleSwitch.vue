@@ -1,7 +1,7 @@
 <!--
   ToggleSwitch —— 开关控件。
 
-  用于「应用配置」页面开启/关闭某个分组，使用按钮实现（而非 checkbox），
+  用于「应用配置」页面开启/关闭分组或单个 Skill，使用按钮实现（而非 checkbox），
   通过 aria-pressed 与 aria-label 提供给读屏软件；颜色随选中状态在
   bg-primary 与 bg-border-strong 之间切换，滑块用 justify-end/start 换位。
 

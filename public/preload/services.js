@@ -8,7 +8,7 @@
  * 职责划分：
  *  1. 配置持久化：全部配置写入 uTools 本地数据库（utools.dbStorage），不落地 JSON 配置文件；
  *  2. 目录扫描：递归扫描统一 Skills 仓库，识别包含 SKILL.md 的目录并解析其中的 YAML 元数据 name；
- *  3. 链接同步：按「Agent + 已启用分组」在 Agent 目录下创建指向仓库源目录的目录链接；
+ *  3. 链接同步：按「Agent + 已启用 Skills」在 Agent 目录下创建指向仓库源目录的目录链接；
  *  4. 安全兜底：只删除本应用创建且校验通过的链接，其余文件/目录/链接一律保留并给出提示。
  *
  * 三条核心安全原则（贯穿全文）：
@@ -53,7 +53,7 @@ const LEGACY_STORAGE_KEYS = Object.freeze({
 /**
  * 创建一份默认配置（首次使用或清除数据后返回）。
  *
- * @returns {{version: number, repositoryPath: string, groups: Array, agents: Array, enabledGroups: object, theme: string}}
+ * @returns {{version: number, repositoryPath: string, groups: Array, agents: Array, enabledGroups: object, enabledSkills: object, theme: string}}
  */
 // 配置只存入 uTools dbStorage；文件系统仅用于扫描 Skill 和维护链接。
 function createDefaultConfig() {
@@ -63,6 +63,7 @@ function createDefaultConfig() {
     groups: [],
     agents: [],
     enabledGroups: {},
+    enabledSkills: {},
     theme: "light",
   };
 }
@@ -212,6 +213,30 @@ function normalizeManagedLinks(input) {
   );
 }
 
+/** 根据启用的 Skill 集合推导完整覆盖的分组，空分组不视为已启用。 */
+function deriveEnabledGroupIds(groups, skillIds) {
+  const enabledSkillIds = new Set(skillIds);
+  return groups
+    .filter(
+      (group) =>
+        group.skillIds.length > 0 &&
+        group.skillIds.every((skillId) => enabledSkillIds.has(skillId)),
+    )
+    .map((group) => group.id);
+}
+
+/** 把旧的分组启用关系转换为 Skill 集合，兼容当前开发阶段已经保存的数据。 */
+function deriveSkillIdsFromGroups(groups, groupIds) {
+  const enabledGroupIds = new Set(groupIds);
+  return [
+    ...new Set(
+      groups
+        .filter((group) => enabledGroupIds.has(group.id))
+        .flatMap((group) => group.skillIds),
+    ),
+  ];
+}
+
 /**
  * 规范化完整配置：清洗分组、Agent、启用关系与主题，保证结构可直接用于后续逻辑。
  * 所有字段都做类型校验与去重，异常记录被忽略而不是让整份配置失效。
@@ -263,14 +288,19 @@ function normalizeConfig(input) {
     });
   }
 
-  // 启用关系：以现存 Agent 为准重建，并过滤掉已不存在的分组 id（分组被删除后的自愈）。
+  // Skill 启用关系是应用配置的唯一真值；旧数据没有该字段时由已启用分组无损转换。
+  const enabledSkills = {};
+  const storedEnabledSkills = isPlainObject(config.enabledSkills)
+    ? config.enabledSkills
+    : null;
+  // 分组启用关系仅为派生缓存，供状态返回与旧数据迁移使用。
   const enabledGroups = {};
   const storedEnabledGroups =
-    config.enabledGroups && typeof config.enabledGroups === "object"
+    isPlainObject(config.enabledGroups)
       ? config.enabledGroups
       : {};
   agents.forEach((agent) => {
-    enabledGroups[agent.id] = [
+    const legacyGroupIds = [
       ...new Set(
         (Array.isArray(storedEnabledGroups[agent.id])
           ? storedEnabledGroups[agent.id]
@@ -278,6 +308,18 @@ function normalizeConfig(input) {
         ).map(String),
       ),
     ].filter((groupId) => groupIds.has(groupId));
+    enabledSkills[agent.id] = [
+      ...new Set(
+        (storedEnabledSkills && Array.isArray(storedEnabledSkills[agent.id])
+          ? storedEnabledSkills[agent.id]
+          : deriveSkillIdsFromGroups(groups, legacyGroupIds)
+        ).map(String),
+      ),
+    ].filter(Boolean);
+    enabledGroups[agent.id] = deriveEnabledGroupIds(
+      groups,
+      enabledSkills[agent.id],
+    );
   });
 
   return {
@@ -287,6 +329,7 @@ function normalizeConfig(input) {
     groups,
     agents,
     enabledGroups,
+    enabledSkills,
     theme: config.theme === "dark" ? "dark" : "light",
   };
 }
@@ -361,6 +404,11 @@ async function validateStoredState(stored, deviceState, legacy = false) {
   if (!Array.isArray(stored?.groups)) fail("分组数据格式异常");
   if (!Array.isArray(stored?.agents)) fail("Agent 数据格式异常");
   if (!isPlainObject(stored?.enabledGroups)) fail("应用配置格式异常");
+  if (
+    stored?.enabledSkills !== undefined &&
+    !isPlainObject(stored.enabledSkills)
+  )
+    fail("Skills 启用配置格式异常");
 
   const groupIds = new Set();
   if (Array.isArray(stored?.groups)) {
@@ -413,6 +461,22 @@ async function validateStoredState(stored, deviceState, legacy = false) {
       ) {
         fail(`Agent“${agentId}”的启用分组数据无效`);
       }
+    });
+  }
+
+  // enabledSkills 是新增的规范字段；字段缺失表示尚未从旧分组关系转换，不判为损坏。
+  if (isPlainObject(stored?.enabledSkills)) {
+    agentIds.forEach((agentId) => {
+      if (!Array.isArray(stored.enabledSkills[agentId]))
+        fail(`Agent“${agentId}”缺少有效的 Skills 启用数组`);
+    });
+    Object.entries(stored.enabledSkills).forEach(([agentId, skillIds]) => {
+      if (
+        !agentIds.has(agentId) ||
+        !Array.isArray(skillIds) ||
+        skillIds.some((id) => typeof id !== "string" || !id)
+      )
+        fail(`Agent“${agentId}”的 Skills 启用数据无效`);
     });
   }
 
@@ -520,6 +584,7 @@ function buildStoredState(
       directory: "",
     })),
     enabledGroups: normalized.enabledGroups,
+    enabledSkills: normalized.enabledSkills,
     theme: normalized.theme,
     deviceStates,
   };
@@ -1096,13 +1161,7 @@ async function scanConfiguredRepository(config) {
  * 不递归扫描整个仓库；任一源目录不可用时标记为不完整，从而保留已有受管链接并停止危险清理。
  */
 async function inspectEnabledCachedSkills(config, agent) {
-  const enabledGroupIds = new Set(config.enabledGroups[agent.id] || []);
-  const desiredSkillIds = new Set();
-  config.groups.forEach((group) => {
-    if (enabledGroupIds.has(group.id)) {
-      group.skillIds.forEach((skillId) => desiredSkillIds.add(skillId));
-    }
-  });
+  const desiredSkillIds = new Set(config.enabledSkills[agent.id] || []);
   const cachedById = new Map(
     normalizeCachedSkills(config._cachedSkills).map((skill) => [
       skill.id,
@@ -1408,10 +1467,10 @@ async function auditUnmanagedLinks(agent, knownPaths) {
 // ============================================================================
 
 /**
- * 同步一个 Agent 目录下的 Skills 链接，使其与「已启用分组包含的 Skills」一致。
+ * 同步一个 Agent 目录下的 Skills 链接，使其与「已启用 Skills」一致。
  *
  * 执行顺序：
- *  1. 计算期望的 Skill 集合（启用分组内所有 skillId）；
+ *  1. 读取该 Agent 已启用的 Skill 集合；
  *  2. 检查目标目录是否可用，不可用则直接返回且不改动任何文件；
  *  3. 只读保护（scan.locked）时仅观察现有链接，不做任何增删；
  *  4. 逐条处理历史受管链接：仍需要且仍然有效的保留，否则安全移除；
@@ -1426,14 +1485,8 @@ async function auditUnmanagedLinks(agent, knownPaths) {
 // 同步遵循“只删除自己创建的链接”原则，任何手动文件、目录和链接都只提示不改动。
 async function syncAgent(config, agent, scan) {
   const issues = [];
-  // 该 Agent 已启用的分组 id 集合。
-  const enabled = new Set(config.enabledGroups[agent.id] || []);
-  // 期望在 Agent 目录中出现的 Skill id 集合。
-  const desiredSkillIds = new Set();
-  config.groups.forEach((group) => {
-    if (enabled.has(group.id))
-      (group.skillIds || []).forEach((skillId) => desiredSkillIds.add(skillId));
-  });
+  // 单个 Skill 集合是唯一同步依据；分组仅作为界面上的批量选择器。
+  const desiredSkillIds = new Set(config.enabledSkills[agent.id] || []);
   // 用 id 索引扫描结果，便于判断某个 skillId 是否仍然存在。
   const skillById = new Map(scan.skills.map((skill) => [skill.id, skill]));
   // 历史受管链接（已规范化）。
@@ -1734,10 +1787,10 @@ async function syncAllAgents(config, scan) {
 }
 
 /**
- * 清理分组中「已从仓库删除」的 Skill 引用。
+ * 清理分组和 Agent 选择中「已从仓库删除」的 Skill 引用。
  * 仅在扫描完整且未处于只读保护时执行，保证不会因扫描失败误删引用。
  *
- * @param {object} config - 当前配置（会就地清理 group.skillIds）
+ * @param {object} config - 当前配置（会就地清理 group.skillIds 与 enabledSkills）
  * @param {object} scan - 仓库扫描结果
  * @returns {Array} 清理过程中产生的问题列表
  */
@@ -1760,6 +1813,25 @@ function reconcileDeletedSkills(config, scan) {
         `分组“${group.name}”中有 ${missing.length} 个 Skill 已从主仓库删除，失效引用已自动清理。`,
       ),
     );
+  });
+  config.agents.forEach((agent) => {
+    const current = config.enabledSkills[agent.id] || [];
+    const missing = current.filter((skillId) => !validSkillIds.has(skillId));
+    config.enabledSkills[agent.id] = current.filter((skillId) =>
+      validSkillIds.has(skillId),
+    );
+    config.enabledGroups[agent.id] = deriveEnabledGroupIds(
+      config.groups,
+      config.enabledSkills[agent.id],
+    );
+    if (missing.length) {
+      issues.push(
+        createIssue(
+          "warning",
+          `Agent“${agent.name}”有 ${missing.length} 个已启用 Skill 不再存在，选择记录和受管链接已自动清理。`,
+        ),
+      );
+    }
   });
   return issues;
 }
@@ -1832,6 +1904,7 @@ function buildState(
       publicAgent(agent, syncResults[agent.id]),
     ),
     enabledGroups: config.enabledGroups,
+    enabledSkills: config.enabledSkills,
     theme: config.theme === "dark" ? "dark" : "light",
     issues: uniqueIssues(issues),
   };
@@ -1932,7 +2005,7 @@ async function refreshState(config) {
  * 只同步一次应用配置开关涉及的 Agent。
  * 使用最近一次完整扫描缓存并逐项验证源目录，避免每次点击都递归遍历整个仓库。
  */
-async function syncAgentGroupsState(config, agent) {
+async function syncAgentSkillsState(config, agent) {
   const targetedScan = await inspectEnabledCachedSkills(config, agent);
   // 先保存新的启用关系和旧链接记录；检查点失败时不会触碰文件系统。
   writeConfig(config);
@@ -2161,12 +2234,12 @@ window.skillsManager = {
       config.groups.length
     )
       throw new Error("分组标识重复，请重新创建分组");
-    // 清理已不存在分组的启用记录（保持启用关系始终有效）。
-    const validIds = new Set(config.groups.map((group) => group.id));
-    Object.keys(config.enabledGroups).forEach((agentId) => {
-      config.enabledGroups[agentId] = (
-        config.enabledGroups[agentId] || []
-      ).filter((groupId) => validIds.has(groupId));
+    // 分组状态由已启用 Skills 实时推导，分组改名或调整内容后仍保持一致。
+    Object.keys(config.enabledSkills).forEach((agentId) => {
+      config.enabledGroups[agentId] = deriveEnabledGroupIds(
+        config.groups,
+        config.enabledSkills[agentId],
+      );
     });
     return refreshState(config);
   },
@@ -2212,9 +2285,10 @@ window.skillsManager = {
       existing.name = name;
       existing.directory = directory;
     } else {
-      // 新增 Agent：同时初始化其启用分组为空数组。
+      // 新增 Agent：同时初始化派生分组与 Skill 选择为空数组。
       config.agents.push({ id, name, directory, managedLinks: {} });
       config.enabledGroups[id] = [];
+      config.enabledSkills[id] = [];
     }
     return refreshState(config);
   },
@@ -2238,8 +2312,9 @@ window.skillsManager = {
       managedLinks: normalizeManagedLinks(agent.managedLinks),
     });
     config.agents = config.agents.filter((item) => item.id !== agentId);
-    // 同步删除该 Agent 的启用分组记录。
+    // 同步删除该 Agent 的分组派生状态与 Skill 选择记录。
     delete config.enabledGroups[agentId];
+    delete config.enabledSkills[agentId];
     const state = refreshState(config);
     return state;
   },
@@ -2284,23 +2359,29 @@ window.skillsManager = {
   },
 
   /**
-   * 设置某个 Agent 启用的分组，并按差集同步其目录下的链接。
+   * 设置某个 Agent 启用的 Skills，并按差集同步其目录下的链接。
    *
    * @param {string} agentId - 目标 Agent id
-   * @param {Array<string>} groupIds - 启用的分组 id 列表
+   * @param {Array<string>} skillIds - 启用的 Skill id 列表
    * @returns {object} 刷新后的完整状态
    * @throws {Error} Agent 不存在或处于只读保护
    */
-  async setAgentGroups(agentId, groupIds) {
+  async setAgentSkills(agentId, skillIds) {
     const config = await readConfig();
     assertConfigWritable(config);
     const agent = config.agents.find((item) => item.id === agentId);
     if (!agent) throw new Error("未找到该 Agent，配置可能已被其他窗口更新");
-    // 过滤掉不存在的分组 id，并对启用列表去重。
-    const validIds = new Set(config.groups.map((group) => group.id));
-    config.enabledGroups[agentId] = [
-      ...new Set(Array.isArray(groupIds) ? groupIds.map(String) : []),
-    ].filter((groupId) => validIds.has(groupId));
-    return syncAgentGroupsState(config, agent);
+    // 只接收最近一次完整扫描确认过的 Skill id，避免异常输入写入配置。
+    const validIds = new Set(
+      normalizeCachedSkills(config._cachedSkills).map((skill) => skill.id),
+    );
+    config.enabledSkills[agentId] = [
+      ...new Set(Array.isArray(skillIds) ? skillIds.map(String) : []),
+    ].filter((skillId) => validIds.has(skillId));
+    config.enabledGroups[agentId] = deriveEnabledGroupIds(
+      config.groups,
+      config.enabledSkills[agentId],
+    );
+    return syncAgentSkillsState(config, agent);
   },
 };

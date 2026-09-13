@@ -1,19 +1,17 @@
 <!--
-  ApplicationsView —— 应用配置页（Agent 与分组的关联关系）。
+  ApplicationsView —— 应用配置页（Agent、分组与 Skills 的联动关系）。
 
-  页面职责：选择目标 Agent，然后逐个开启/关闭分组。
-  开关先由 Pinia 乐观更新；短暂防抖后只把最终状态提交给 preload 服务做差量同步：
-  - 新开启的分组内的 Skills，会在 Agent 目录下创建指向仓库源目录的链接；
-  - 取消开启或被删除的分组，只会移除「本应用创建且仍指向原目标」的受管链接，
-    手动创建的文件/目录/链接一律保留并给出提示。
+  页面职责：选择目标 Agent，然后通过左侧分组批量选择或右侧开关单独选择 Skills。
+  已启用的 Skill id 集合是唯一真值：分组中的 Skills 全部开启时分组自动显示开启，
+  操作分组则批量增删该组 Skills，重叠分组也会根据最终覆盖情况自动更新。
 
-  数据流：activeGroups 取自 store.enabledGroups[选中 Agent]，
-  开关状态完全由 store 决定（受控组件），由 store 负责乐观更新、请求合并和失败回滚，
+  开关状态完全由 store.enabledSkills 决定（受控组件），
+  store 负责乐观更新、请求合并和失败回滚，
   以保证连续操作流畅，同时让界面最终状态与磁盘上的真实链接一致。
 -->
 <script setup>
-// 图标：Bot 表示 Agent，Layers3 表示分组。
-import { Bot, Layers3 } from "@lucide/vue";
+// 图标：Bot 表示 Agent，Layers3 表示分组，Puzzle 表示单个 Skill。
+import { Bot, Layers3, Puzzle } from "@lucide/vue";
 // computed 派生选中项与统计信息；ref 保存当前选中的 Agent；watch 保证选择始终有效。
 import { computed, ref, watch } from "vue";
 // 下拉选择组件。
@@ -38,12 +36,22 @@ const agentOptions = computed(() =>
 const selectedAgent = computed(() =>
   store.agents.find((agent) => agent.id === selectedAgentId.value),
 );
-// 派生：当前 Agent 已启用的分组 id 数组，直接驱动各分组开关的显示状态。
-const activeGroups = computed(
-  () => store.enabledGroups[selectedAgentId.value] || [],
+// 派生：当前 Agent 已启用的 Skill id 数组，是左右两列联动的唯一数据源。
+const activeSkillIds = computed(
+  () => store.enabledSkills[selectedAgentId.value] || [],
 );
-// 使用服务端核验后的实际链接数量，冲突或创建失败的 Skill 不会被误计为已链接。
-const actualLinkedCount = computed(() => selectedAgent.value?.linkedCount || 0);
+const activeSkillSet = computed(() => new Set(activeSkillIds.value));
+// 组内至少有一个 Skill，且所有 Skills 均已开启时，该分组自动显示为开启。
+const activeGroups = computed(() =>
+  store.groups.filter(
+    (group) =>
+      group.skillIds.length > 0 &&
+      group.skillIds.every((skillId) => activeSkillSet.value.has(skillId)),
+  ),
+);
+const activeGroupIdSet = computed(
+  () => new Set(activeGroups.value.map((group) => group.id)),
+);
 
 // Agent 列表发生变化时保证选择值始终有效。
 // immediate 让首次进入页面时自动选中第一个 Agent；deep 保证重命名等改动也能触发校验。
@@ -59,16 +67,26 @@ watch(
 /**
  * 开启或关闭某个分组。
  *
- * @param {string} groupId - 分组 id
+ * @param {{id: string, skillIds: string[]}} group - 分组
  * @param {boolean} enabled - 开关的目标状态（true 为开启）
  */
-async function setGroup(groupId, enabled) {
-  // 依据目标状态计算新的启用列表；Pinia 会合并连续切换，服务端只处理最终差集。
-  const next = enabled
-    ? [...activeGroups.value, groupId]
-    : activeGroups.value.filter((id) => id !== groupId);
+async function setGroup(group, enabled) {
+  const next = new Set(activeSkillIds.value);
+  group.skillIds.forEach((skillId) =>
+    enabled ? next.add(skillId) : next.delete(skillId),
+  );
   try {
-    await store.setAgentGroups(selectedAgentId.value, next);
+    await store.setAgentSkills(selectedAgentId.value, [...next]);
+  } catch (_) {}
+}
+
+/** 单独开启或关闭一个 Skill；覆盖完整分组时，左侧分组会自动联动。 */
+async function setSkill(skillId, enabled) {
+  const next = new Set(activeSkillIds.value);
+  if (enabled) next.add(skillId);
+  else next.delete(skillId);
+  try {
+    await store.setAgentSkills(selectedAgentId.value, [...next]);
   } catch (_) {}
 }
 </script>
@@ -81,7 +99,7 @@ async function setGroup(groupId, enabled) {
     <PageHeader
       eyebrow="按需启用"
       title="应用配置"
-      description="选择 Agent，开启或关闭 Skills 分组。"
+      description="选择 Agent，通过分组批量配置或单独开启 Skills。"
     />
 
     <!-- 有 Agent 时才展示配置界面 -->
@@ -112,9 +130,9 @@ async function setGroup(groupId, enabled) {
           >
           <span
             ><strong class="mr-1 text-lg text-primary">{{
-              actualLinkedCount
+              activeSkillIds.length
             }}</strong
-            >个 Skills 已链接</span
+            >个 Skills 已开启</span
           >
         </div>
         <!-- 当前 Agent 的 Skills 目录，便于确认配置是否指向预期位置 -->
@@ -126,43 +144,100 @@ async function setGroup(groupId, enabled) {
         </p>
       </div>
 
-      <!-- 分组开关列表：每行展示分组名、包含的 Skills 数量与开关 -->
+      <!-- 双栏配置区：左侧分组批量开关，右侧全部 Skills 单项开关。 -->
       <div
-        v-if="store.groups.length"
-        class="mt-4 grid overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
+        class="mt-4 grid grid-cols-2 items-start gap-4 max-[760px]:grid-cols-1"
       >
-        <div
-          v-for="group in store.groups"
-          :key="group.id"
-          class="flex min-h-16.5 items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+        <section
+          class="grid overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
         >
-          <div
-            class="grid size-9.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
+          <header
+            class="flex min-h-14 items-center gap-2 border-b border-border px-4"
           >
-            <Layers3 :size="18" :stroke-width="1.8" />
-          </div>
-          <div class="flex min-w-0 flex-1 flex-col gap-1">
-            <strong class="truncate">{{ group.name }}</strong
-            ><span class="text-xs text-ink-muted"
-              >{{ group.skillIds.length }} 个 Skills</span
+            <Layers3 class="text-primary" :size="18" :stroke-width="1.8" />
+            <h2 class="m-0 flex-1 text-sm font-bold text-ink">Skills 分组</h2>
+            <span class="text-xs text-ink-muted"
+              >{{ activeGroups.length }}/{{ store.groups.length }}</span
             >
-          </div>
-          <!-- 受控开关：状态来自 store，连续切换由 store 防抖合并后提交 -->
-          <ToggleSwitch
-            :model-value="activeGroups.includes(group.id)"
-            :disabled="store.busy"
-            :label="`${group.name} 开关`"
-            @update:model-value="setGroup(group.id, $event)"
+          </header>
+
+          <template v-if="store.groups.length">
+            <div
+              v-for="group in store.groups"
+              :key="group.id"
+              class="flex min-h-16.5 items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
+            >
+              <div
+                class="grid size-9.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
+              >
+                <Layers3 :size="18" :stroke-width="1.8" />
+              </div>
+              <div class="flex min-w-0 flex-1 flex-col gap-1">
+                <strong class="truncate">{{ group.name }}</strong>
+                <span class="text-xs text-ink-muted"
+                  >{{ group.skillIds.length }} 个 Skills</span
+                >
+              </div>
+              <!-- 开启时批量加入组内 Skills；关闭时批量移除。 -->
+              <ToggleSwitch
+                :model-value="activeGroupIdSet.has(group.id)"
+                :disabled="store.busy || !group.skillIds.length"
+                :label="`${group.name} 分组开关`"
+                @update:model-value="setGroup(group, $event)"
+              />
+            </div>
+          </template>
+          <EmptyState
+            v-else
+            :icon="Layers3"
+            title="没有可应用的分组"
+            description="先在分组管理页面创建至少一个分组。"
           />
-        </div>
+        </section>
+
+        <section
+          class="grid overflow-hidden rounded-xl border border-border bg-surface shadow-sm"
+        >
+          <header
+            class="flex min-h-14 items-center gap-2 border-b border-border px-4"
+          >
+            <Puzzle class="text-primary" :size="18" :stroke-width="1.8" />
+            <h2 class="m-0 flex-1 text-sm font-bold text-ink">全部 Skills</h2>
+            <span class="text-xs text-ink-muted"
+              >{{ activeSkillIds.length }}/{{ store.skills.length }}</span
+            >
+          </header>
+
+          <template v-if="store.skills.length">
+            <div
+              v-for="skill in store.skills"
+              :key="skill.id"
+              class="flex min-h-14 items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0"
+            >
+              <div
+                class="grid size-8.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
+              >
+                <Puzzle :size="16" :stroke-width="1.8" />
+              </div>
+              <strong class="min-w-0 flex-1 truncate text-sm">{{
+                skill.name
+              }}</strong>
+              <ToggleSwitch
+                :model-value="activeSkillSet.has(skill.id)"
+                :disabled="store.busy"
+                :label="`${skill.name} Skill 开关`"
+                @update:model-value="setSkill(skill.id, $event)"
+              />
+            </div>
+          </template>
+          <EmptyState
+            v-else
+            :icon="Puzzle"
+            title="没有可应用的 Skill"
+            description="请先在 Skills 仓库页面配置并扫描仓库。"
+          />
+        </section>
       </div>
-      <!-- 已有 Agent 但还没有分组：引导先去创建分组 -->
-      <EmptyState
-        v-else
-        :icon="Layers3"
-        title="没有可应用的分组"
-        description="先在分组管理页面创建至少一个分组。"
-      />
     </template>
     <!-- 还没有任何 Agent：引导先去 Agents 页面添加 -->
     <EmptyState
