@@ -6,13 +6,13 @@ const emit = defineEmits(['update:modelValue'])
 <template>
   <button
     type="button"
-    class="relative h-6 w-[42px] shrink-0 rounded-full border-0 bg-border-strong p-0 outline-none ring-primary-soft focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50"
-    :class="modelValue ? 'bg-primary' : 'bg-border-strong'"
+    class="flex h-6 w-11 shrink-0 items-center rounded-full border-0 p-0.5 outline-none ring-primary-soft focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-50"
+    :class="modelValue ? 'justify-end bg-primary' : 'justify-start bg-border-strong'"
     :aria-pressed="modelValue"
     :aria-label="label"
     :disabled="disabled"
     @click="emit('update:modelValue', !modelValue)"
   >
-    <span class="absolute top-[3px] size-[18px] rounded-full bg-control-thumb shadow-sm" :class="modelValue ? 'left-[21px]' : 'left-[3px]'" />
+    <span class="size-5 shrink-0 rounded-full bg-control-thumb shadow-sm" />
   </button>
 </template>

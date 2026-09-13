@@ -1,5 +1,5 @@
 <script setup>
-import { Bot, Pencil, Trash2 } from '@lucide/vue'
+import { Bot, Moon, Pencil, Sun, Trash2 } from '@lucide/vue'
 import { ref } from 'vue'
 import EmptyState from '../components/EmptyState.vue'
 import PageHeader from '../components/PageHeader.vue'
@@ -57,7 +57,13 @@ async function remove (agent) {
 
 <template>
   <section class="mx-auto flex min-h-full w-[calc(100%_-_3rem)] max-w-[1040px] flex-col py-[30px] pb-12 max-[760px]:w-[calc(100%_-_2rem)]">
-    <PageHeader eyebrow="目标管理" title="Agents" description="保存 Agent 名称及其 Skills 目录，供应用配置使用。" />
+    <PageHeader eyebrow="目标管理" title="Agents" description="保存 Agent 名称及其 Skills 目录，供应用配置使用。">
+      <button class="inline-flex h-10 items-center justify-center gap-2 rounded-md border border-border bg-surface px-3 font-semibold text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary" type="button" :aria-label="store.theme === 'dark' ? '切换浅色主题' : '切换深色主题'" @click="store.toggleTheme">
+        <Sun v-if="store.theme === 'dark'" :size="18" :stroke-width="1.8" />
+        <Moon v-else :size="18" :stroke-width="1.8" />
+        <span>{{ store.theme === 'dark' ? '浅色主题' : '深色主题' }}</span>
+      </button>
+    </PageHeader>
 
     <div class="grid grid-cols-[190px_minmax(0,1fr)_auto] items-end gap-3 rounded-xl border border-border bg-surface p-5 shadow-sm max-[760px]:grid-cols-1">
       <div><label class="mb-1.5 block text-xs font-semibold text-ink-secondary" for="agent-name">Agent 名称</label><input id="agent-name" v-model="name" class="h-10 w-full rounded-md border border-border-strong bg-surface px-3 text-ink outline-none placeholder:text-ink-muted focus:border-primary focus:ring-2 focus:ring-primary-soft" placeholder="例如：Codex" /></div>

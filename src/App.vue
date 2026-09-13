@@ -1,5 +1,5 @@
 <script setup>
-import { Bot, Database, Layers3, Link2, Moon, Sun, X, Check, CircleAlert } from '@lucide/vue'
+import { Bot, Database, Layers3, Link2, X, Check, CircleAlert } from '@lucide/vue'
 import { onMounted } from 'vue'
 import { RouterLink, RouterView, useRouter } from 'vue-router'
 import ConfirmDialog from './components/ConfirmDialog.vue'
@@ -23,26 +23,16 @@ onMounted(() => {
 
 <template>
   <div class="flex h-full flex-col bg-canvas text-ink">
-    <header class="flex h-16 shrink-0 items-center gap-8 border-b border-border bg-surface px-6 max-[760px]:gap-3 max-[760px]:px-4">
-      <div class="flex shrink-0 items-center gap-2.5 font-bold tracking-tight">
-        <span class="grid size-[34px] place-items-center rounded-lg bg-primary text-on-primary"><Link2 :size="20" :stroke-width="1.9" /></span>
-        <span class="max-[760px]:hidden">Skills Manager</span>
-      </div>
-
-      <nav class="flex h-full flex-1 items-stretch gap-1" aria-label="主导航">
+    <header class="flex h-16 shrink-0 items-center justify-center border-b border-border bg-surface px-6 max-[760px]:px-4">
+      <nav class="flex h-full items-stretch justify-center gap-1" aria-label="主导航">
         <RouterLink
           v-for="tab in tabs"
           :key="tab.path"
           :to="tab.path"
-          class="relative flex min-w-[108px] items-center justify-center gap-2 px-4 text-ink-secondary hover:bg-canvas hover:text-ink max-[760px]:min-w-0 max-[760px]:flex-1 max-[760px]:px-2"
-          active-class="font-semibold text-primary after:absolute after:right-3 after:bottom-0 after:left-3 after:h-0.5 after:bg-primary"
+          class="relative flex min-w-[118px] items-center justify-center gap-2 px-4 font-bold text-ink-secondary hover:bg-canvas hover:text-ink max-[760px]:min-w-0 max-[760px]:px-3"
+          active-class="text-primary after:absolute after:right-3 after:bottom-0 after:left-3 after:h-0.5 after:bg-primary"
         ><component :is="tab.icon" :size="17" :stroke-width="1.8" /><span>{{ tab.label }}</span></RouterLink>
       </nav>
-
-      <button class="grid size-9 shrink-0 place-items-center rounded-md border border-border bg-surface text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary" type="button" :aria-label="store.theme === 'dark' ? '切换浅色主题' : '切换深色主题'" @click="store.toggleTheme">
-        <Sun v-if="store.theme === 'dark'" :size="18" :stroke-width="1.8" />
-        <Moon v-else :size="18" :stroke-width="1.8" />
-      </button>
     </header>
 
     <main class="min-h-0 flex-1 overflow-auto"><RouterView /></main>
