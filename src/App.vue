@@ -115,7 +115,7 @@ onMounted(() => {
         }}</span>
         <!-- 关闭按钮：手动关闭提示并清理其自动关闭定时器 -->
         <button
-          class="grid size-6 shrink-0 place-items-center rounded border-0 bg-transparent text-current hover:bg-surface/10"
+          class="grid size-6 shrink-0 place-items-center rounded border-0 bg-transparent text-current hover:opacity-70"
           type="button"
           aria-label="关闭提示"
           @click="store.dismissNotice(notice.id)"
