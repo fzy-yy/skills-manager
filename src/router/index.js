@@ -57,9 +57,8 @@ const router = createRouter({
     // 分组只保存 Skill 的 id 列表（见 appStore 的 groups），不缓存路径，
     // 因此仓库迁移或 Skill 重命名后需由应用配置页重新同步。
     { path: "/groups", name: "groups", component: GroupsView },
-    // 应用配置：为指定 Agent 开启/关闭分组，从而增删其目录下的 Skills 链接。
-    // 注意：该页面的开关会直接改动 Agent 目录下的真实文件链接，属于破坏性操作，
-    // 因此交互上必须先经确认对话框（appStore.confirm）再提交给 preload 服务。
+    // 应用配置：通过分组或单项开关维护 Agent 的 Skills 链接。
+    // 高频开关采用防抖合并与失败回滚，不弹确认框；底层只会删除本应用确认归属的受管链接。
     {
       path: "/applications",
       name: "applications",

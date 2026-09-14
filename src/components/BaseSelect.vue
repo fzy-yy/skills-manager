@@ -14,7 +14,15 @@
 // lucide 图标：下拉箭头（触发按钮）与勾选标记（当前选中项）。
 import { Check, ChevronDown } from "@lucide/vue";
 // computed 计算当前选中项；onMounted/onBeforeUnmount 注册与注销全局点击监听。
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import {
+  computed,
+  nextTick,
+  onBeforeUpdate,
+  onBeforeUnmount,
+  onMounted,
+  ref,
+  useId,
+} from "vue";
 
 // ============ 二、组件接口（props / emits） ============
 // 组件属性定义。
@@ -34,6 +42,10 @@ const emit = defineEmits(["update:modelValue"]);
 // ============ 三、内部状态 ============
 // 组件根元素引用，用于判断点击是否发生在组件内部。
 const root = ref(null);
+// 触发按钮与选项按钮引用用于键盘导航和关闭后的焦点恢复。
+const trigger = ref(null);
+const optionButtons = ref([]);
+const listboxId = useId();
 // 浮层展开状态。
 const open = ref(false);
 // 易踩坑：这里用全等比较，因此 option.value 的类型必须与 v-model 传入的类型一致
@@ -52,6 +64,65 @@ const selected = computed(() =>
 function select(option) {
   emit("update:modelValue", option.value);
   open.value = false;
+  nextTick(() => trigger.value?.focus());
+}
+
+/** 展开菜单并聚焦当前选中项；未选择时聚焦首项或末项。 */
+async function openAndFocus(position = "selected") {
+  if (props.disabled || !props.options.length) return;
+  open.value = true;
+  await nextTick();
+  const selectedIndex = props.options.findIndex(
+    (option) => option.value === props.modelValue,
+  );
+  const index =
+    position === "last"
+      ? props.options.length - 1
+      : position === "first"
+        ? 0
+        : Math.max(selectedIndex, 0);
+  optionButtons.value[index]?.focus();
+}
+
+/** 在选项之间循环移动焦点。 */
+function moveOptionFocus(event, offset) {
+  event.preventDefault();
+  const currentIndex = optionButtons.value.indexOf(document.activeElement);
+  const nextIndex =
+    (Math.max(currentIndex, 0) + offset + optionButtons.value.length) %
+    optionButtons.value.length;
+  optionButtons.value[nextIndex]?.focus();
+}
+
+/** 按渲染下标保存选项元素，避免函数 ref 在重复渲染时累积旧节点。 */
+function setOptionRef(element, index) {
+  if (element) optionButtons.value[index] = element;
+  else optionButtons.value[index] = undefined;
+}
+
+/** 收起菜单并把焦点交还触发按钮。 */
+function closeAndRestoreFocus() {
+  open.value = false;
+  nextTick(() => trigger.value?.focus());
+}
+
+/** 根据输入字符跳转到下一个匹配项，提供基础 typeahead 能力。 */
+async function focusByTypeahead(event) {
+  if (event.ctrlKey || event.metaKey || event.altKey || event.key.length !== 1)
+    return;
+  const query = event.key.toLocaleLowerCase();
+  const currentIndex = optionButtons.value.indexOf(document.activeElement);
+  const ordered = props.options.map((option, index) => ({ option, index }));
+  const match = [...ordered.slice(currentIndex + 1), ...ordered].find(
+    ({ option }) => String(option.label).toLocaleLowerCase().startsWith(query),
+  );
+  if (!match) return;
+  event.preventDefault();
+  if (!open.value) {
+    open.value = true;
+    await nextTick();
+  }
+  optionButtons.value[match.index]?.focus();
 }
 
 /**
@@ -66,6 +137,10 @@ function handleOutsideClick(event) {
 // 监听 mousedown 而非 click：按下阶段就能收起浮层，不会与选项自身的 click 选中逻辑互相干扰。
 // 浮层是普通 DOM 节点而非 Portal，因此用全局 mousedown 判断“外部点击”。
 onMounted(() => document.addEventListener("mousedown", handleOutsideClick));
+// 每次选项列表重绘前清空元素引用，避免列表缩短后键盘导航命中已卸载节点。
+onBeforeUpdate(() => {
+  optionButtons.value = [];
+});
 // 组件卸载时必须移除监听，防止内存泄漏与已销毁组件被访问。
 onBeforeUnmount(() =>
   document.removeEventListener("mousedown", handleOutsideClick),
@@ -78,12 +153,20 @@ onBeforeUnmount(() =>
   <div ref="root" class="relative w-full">
     <!-- 触发按钮：展示当前选中项或占位文案，并声明 listbox 语义 -->
     <button
+      ref="trigger"
       type="button"
       class="flex h-10 w-full items-center justify-between gap-3 rounded-md border border-border-strong bg-surface px-3 text-left text-ink outline-none hover:border-primary-border focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary-soft disabled:cursor-not-allowed disabled:opacity-50"
       :disabled="disabled"
       :aria-expanded="open"
+      :aria-controls="listboxId"
       aria-haspopup="listbox"
-      @click="open = !open"
+      @click="open ? closeAndRestoreFocus() : openAndFocus()"
+      @keydown.down.prevent="openAndFocus('first')"
+      @keydown.up.prevent="openAndFocus('last')"
+      @keydown.home.prevent="openAndFocus('first')"
+      @keydown.end.prevent="openAndFocus('last')"
+      @keydown.esc.prevent="closeAndRestoreFocus"
+      @keydown="focusByTypeahead"
     >
       <span
         class="truncate"
@@ -100,13 +183,15 @@ onBeforeUnmount(() =>
     <!-- 选项浮层：z-30 高于页面内容，height 上限 240px 且超出可滚动 -->
     <div
       v-if="open"
+      :id="listboxId"
       class="absolute z-30 mt-1.5 grid max-h-60 w-full gap-1 overflow-y-auto rounded-lg border border-border bg-surface-raised p-1.5 shadow-xl"
       role="listbox"
     >
       <!-- 选中态同时使用颜色与勾选图标，避免仅靠颜色传达状态，保证色弱用户也能分辨 -->
       <!-- 单个选项：选中项使用主色底强调，并显示勾选图标 -->
       <button
-        v-for="option in options"
+        v-for="(option, index) in options"
+        :ref="(element) => setOptionRef(element, index)"
         :key="option.value"
         type="button"
         role="option"
@@ -118,6 +203,13 @@ onBeforeUnmount(() =>
             : 'bg-transparent text-ink'
         "
         @click="select(option)"
+        @keydown.down="moveOptionFocus($event, 1)"
+        @keydown.up="moveOptionFocus($event, -1)"
+        @keydown.home.prevent="optionButtons[0]?.focus()"
+        @keydown.end.prevent="optionButtons[optionButtons.length - 1]?.focus()"
+        @keydown.esc.prevent="closeAndRestoreFocus"
+        @keydown.tab="open = false"
+        @keydown="focusByTypeahead"
       >
         <span class="truncate">{{ option.label }}</span
         ><Check v-if="option.value === modelValue" :size="16" />

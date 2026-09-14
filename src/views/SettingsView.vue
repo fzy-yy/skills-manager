@@ -98,7 +98,8 @@ async function clearData() {
           v-for="option in themeOptions"
           :key="option.value"
           type="button"
-          class="inline-flex h-9 items-center justify-center gap-2 rounded-md border-0 px-3 font-semibold"
+          class="inline-flex h-9 items-center justify-center gap-2 rounded-md border-0 px-3 font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="store.busy"
           :class="
             store.theme === option.value
               ? 'bg-surface text-primary shadow-sm'

@@ -40,6 +40,8 @@ export const useAppStore = defineStore("app", () => {
   const agents = ref([]);
   // 每个 Agent 已启用的 Skills：{ [agentId]: skillId[] }，是应用配置的唯一真值。
   const enabledSkills = ref({});
+  // 每个 Agent 最近一次链接同步产生的问题；应用配置页以内联方式聚合展示，避免通知刷屏。
+  const agentSyncIssues = ref({});
   // 当前主题，取值 'light' 或 'dark'。
   const theme = ref("light");
   // 是否已完成首次初始化（读取本地配置），用于避免首屏空白闪烁。
@@ -74,6 +76,9 @@ export const useAppStore = defineStore("app", () => {
   let skillSyncTimer;
   // 是否正在把某项变更提交给 preload，避免同一个 flush 被重入导致同一 Agent 重复落库。
   let skillSyncFlushing = false;
+  // 云端数据库拉取事件可能连续触发；这里只保留一次延迟刷新，且等待本地写操作完全空闲。
+  let externalRefreshTimer;
+  let unsubscribeDataChanged;
   // 300ms 足以合并「连续勾选多个 Skill」与「误触后立即改回」，
   // 又短到用户不会觉得开关响应迟滞；调大或调小都会在流畅性与即时性之间失衡。
   const SKILL_SYNC_DEBOUNCE_MS = 300;
@@ -121,8 +126,15 @@ export const useAppStore = defineStore("app", () => {
       skills.value = Array.isArray(next.skills) ? next.skills : [];
     if (Object.hasOwn(next, "groups"))
       groups.value = Array.isArray(next.groups) ? next.groups : [];
-    if (Object.hasOwn(next, "agents"))
+    if (Object.hasOwn(next, "agents")) {
       agents.value = Array.isArray(next.agents) ? next.agents : [];
+      const validAgentIds = new Set(agents.value.map((agent) => agent.id));
+      agentSyncIssues.value = Object.fromEntries(
+        Object.entries(agentSyncIssues.value).filter(([agentId]) =>
+          validAgentIds.has(agentId),
+        ),
+      );
+    }
     // enabledSkills 是应用配置的唯一真值：Agent 目录下的受管链接完全由它推导，
     // 因此合并要格外小心，不能让服务端返回的旧值覆盖用户刚点下的选择。
     if (Object.hasOwn(next, "enabledSkills")) {
@@ -173,8 +185,7 @@ export const useAppStore = defineStore("app", () => {
     )
       return;
     // 全局提示设置硬上限，异常链接很多时也不会拖慢渲染。
-    while (notices.value.length >= 20)
-      dismissNotice(notices.value[0].id);
+    while (notices.value.length >= 20) dismissNotice(notices.value[0].id);
     // id 单调递增：提示可被手动关闭，用数组下标做 :key 会让 Vue 复用错的节点。
     const id = ++noticeSequence;
     notices.value.push({ id, message: normalizedMessage, type });
@@ -200,6 +211,17 @@ export const useAppStore = defineStore("app", () => {
       notify(issue?.message, issue?.type || "warning"),
     );
     return safeIssues;
+  }
+
+  /** 保存指定 Agent 最近一次同步的问题，空数组表示本轮已恢复正常。 */
+  function setAgentSyncIssues(agentId, issues) {
+    const normalized = (Array.isArray(issues) ? issues : []).filter(
+      (issue) => issue?.message && ["error", "warning"].includes(issue.type),
+    );
+    agentSyncIssues.value = {
+      ...agentSyncIssues.value,
+      [agentId]: normalized,
+    };
   }
 
   // ---------- 统一操作封装 ----------
@@ -311,6 +333,8 @@ export const useAppStore = defineStore("app", () => {
         undefined,
         { reportResultIssues: false },
       );
+      // 高频开关不弹逐项通知，但错误不能静默；由应用配置页集中展示本轮结果。
+      setAgentSyncIssues(agentId, result?.issues);
       // 同一个 Agent 在防抖窗口内的多次调用共享一个 Promise，全部等待者一起完成。
       pending.waiters.forEach(({ resolve }) => resolve(result));
     } catch (error) {
@@ -322,6 +346,9 @@ export const useAppStore = defineStore("app", () => {
           [agentId]: [...pending.baseSkillIds],
         };
       }
+      setAgentSyncIssues(agentId, [
+        { type: "error", message: error?.message || "链接同步失败，请重试" },
+      ]);
       // 拒绝等待者，让页面里的 await 能感知失败；错误文案已由 execute 全局提示过。
       pending.waiters.forEach(({ reject }) => reject(error));
     } finally {
@@ -384,6 +411,11 @@ export const useAppStore = defineStore("app", () => {
   function cancelPendingAgentSkills(agentId) {
     const pending = pendingSkillSyncs.get(agentId);
     if (!pending) return;
+    // 取消意味着本轮选择永远不会落库，必须恢复入队前的真实值，避免删除/清除失败后留下假状态。
+    enabledSkills.value = {
+      ...enabledSkills.value,
+      [agentId]: [...pending.baseSkillIds],
+    };
     // 等待者以 null 完成（表示「不必再提交」），不抛错，避免打断删除或清除流程。
     pendingSkillSyncs.delete(agentId);
     pending.waiters.forEach(({ resolve }) => resolve(null));
@@ -459,6 +491,12 @@ export const useAppStore = defineStore("app", () => {
             result?.groups?.length ||
             result?.agents?.length,
         );
+        // 其他设备同步数据库后，等待本地操作空闲再读取并收敛链接；连续事件会自动合并。
+        if (!unsubscribeDataChanged && api().onDataChanged) {
+          unsubscribeDataChanged = api().onDataChanged(() =>
+            scheduleExternalRefresh(),
+          );
+        }
       }
       // 非 uTools 环境没有持久化能力，强制使用浅色主题，避免残留 class。
       else document.documentElement.classList.remove("dark");
@@ -479,6 +517,22 @@ export const useAppStore = defineStore("app", () => {
     }
   }
 
+  /** 在本地队列空闲后应用其他设备同步来的配置，避免覆盖正在编辑的乐观状态。 */
+  function scheduleExternalRefresh(delay = 250) {
+    clearTimeout(externalRefreshTimer);
+    externalRefreshTimer = setTimeout(async () => {
+      if (operationInFlight || skillSyncFlushing || pendingSkillSyncs.size) {
+        scheduleExternalRefresh(300);
+        return;
+      }
+      try {
+        await execute(() => api().reconcile());
+      } catch (_) {
+        // execute 已提供明确错误提示；这里仅防止事件回调产生未处理的 Promise 拒绝。
+      }
+    }, delay);
+  }
+
   /**
    * 切换主题：先乐观更新界面，再持久化到 uTools 本地数据库；失败时回滚。
    *
@@ -495,11 +549,7 @@ export const useAppStore = defineStore("app", () => {
     theme.value = nextTheme;
     try {
       // 浏览器预览环境没有 preload，只切换界面主题，不做持久化。
-      if (window.skillsManager) {
-        const result = await api().setTheme(nextTheme);
-        applyState(result);
-        reportIssues(result?.issues);
-      }
+      if (window.skillsManager) await execute(() => api().setTheme(nextTheme));
       return true;
     } catch (error) {
       // 保存失败时回滚到切换前的主题，保持界面与数据库一致。
@@ -532,6 +582,7 @@ export const useAppStore = defineStore("app", () => {
     groups,
     agents,
     enabledSkills,
+    agentSyncIssues,
     theme,
     ready,
     busy,

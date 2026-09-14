@@ -20,7 +20,7 @@
 -->
 <script setup>
 // 图标：Bot 表示 Agent，Layers3 表示分组，Puzzle 表示单个 Skill。
-import { Bot, Layers3, Puzzle } from "@lucide/vue";
+import { Bot, CircleAlert, Layers3, Puzzle } from "@lucide/vue";
 // computed 派生选中项与统计信息；ref 保存当前选中的 Agent；watch 保证选择始终有效。
 import { computed, ref, watch } from "vue";
 // 下拉选择组件。
@@ -66,6 +66,13 @@ const activeGroups = computed(() =>
 // 模板里的分组开关是受控组件，用 Set 让判断保持 O(1)，避免每次渲染都遍历数组。
 const activeGroupIdSet = computed(
   () => new Set(activeGroups.value.map((group) => group.id)),
+);
+// 高频开关产生的问题以内联摘要展示，不使用右下角逐 Skill 通知。
+const syncIssues = computed(
+  () => store.agentSyncIssues[selectedAgentId.value] || [],
+);
+const syncHasErrors = computed(() =>
+  syncIssues.value.some((issue) => issue.type === "error"),
 );
 
 // Agent 列表发生变化时保证选择值始终有效。
@@ -134,7 +141,7 @@ async function setSkill(skillId, enabled) {
       <!-- 目标选择卡片：Agent 下拉框 + 右侧开启数量统计 + 下方目录路径 -->
       <!-- 统计与目录都属于「当前 Agent 的只读信息」，切换 Agent 时会自动重新派生 -->
       <div
-        class="grid grid-cols-[minmax(0,420px)_1fr] items-end gap-x-6 gap-y-2 rounded-xl border border-border bg-surface p-5 shadow-sm"
+        class="grid grid-cols-[minmax(0,420px)_minmax(0,1fr)] items-end gap-x-6 gap-y-2 rounded-xl border border-border bg-surface p-5 shadow-sm max-[760px]:grid-cols-1"
       >
         <!-- 左侧：目标 Agent 下拉选择（图标 + 下拉框） -->
         <div>
@@ -151,7 +158,9 @@ async function setSkill(skillId, enabled) {
         </div>
         <!-- 统计信息：已开启分组数与实际链接的 Skills 数 -->
         <!-- 两个数字都来自 store.enabledSkills 的派生结果，和右侧逐个开关始终一致 -->
-        <div class="flex justify-end gap-6 text-xs text-ink-secondary">
+        <div
+          class="flex flex-wrap justify-end gap-x-6 gap-y-1 text-xs text-ink-secondary max-[760px]:justify-start max-[760px]:pl-6.5"
+        >
           <span
             ><strong class="mr-1 text-lg text-primary">{{
               activeGroups.length
@@ -169,10 +178,37 @@ async function setSkill(skillId, enabled) {
         <!-- 用 v-if 兼容「Agent 被其他窗口删除」的瞬时状态，避免渲染 undefined -->
         <p
           v-if="selectedAgent"
-          class="col-span-2 m-0 truncate pl-6.5 font-mono text-xs text-ink-muted"
+          class="col-span-2 m-0 truncate pl-6.5 font-mono text-xs text-ink-muted max-[760px]:col-span-1"
         >
           {{ selectedAgent.directory || "当前设备尚未配置 Skills 目录" }}
         </p>
+      </div>
+
+      <!-- 只汇总最近一次同步异常；下一次成功同步会自动清空。 -->
+      <div
+        v-if="syncIssues.length"
+        class="mt-3 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-sm"
+        :class="
+          syncHasErrors
+            ? 'border-danger bg-danger-soft text-danger'
+            : 'border-warning bg-warning-soft text-warning'
+        "
+        :role="syncHasErrors ? 'alert' : 'status'"
+      >
+        <CircleAlert class="mt-0.5 shrink-0" :size="17" />
+        <div class="min-w-0">
+          <strong class="block font-bold">链接同步存在问题</strong>
+          <p
+            v-for="issue in syncIssues.slice(0, 3)"
+            :key="`${issue.type}:${issue.message}`"
+            class="mt-1 mb-0 wrap-break-word"
+          >
+            {{ issue.message }}
+          </p>
+          <p v-if="syncIssues.length > 3" class="mt-1 mb-0">
+            另有 {{ syncIssues.length - 3 }} 条问题，请修复目录后重新操作。
+          </p>
+        </div>
       </div>
 
       <!-- 双栏配置区：左侧分组批量开关，右侧全部 Skills 单项开关。 -->

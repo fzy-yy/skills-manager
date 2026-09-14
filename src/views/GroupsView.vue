@@ -10,8 +10,7 @@
   - draftName / draftSkills 是编辑草稿，只有点击“保存分组”才会写回 store.groups；
   - selectedGroup 为 undefined 表示“正在新建分组”。
 
-  注意：删除分组只影响配置，不会删除仓库源文件；已启用该分组的 Agent
-  会在服务端同步移除对应的受管链接（链接同步逻辑见 public/preload/services.js）。
+  注意：删除分组只影响组合配置，不会删除仓库源文件，也不会关闭 Agent 已单独启用的 Skills。
 -->
 <script setup>
 // 图标：Check 勾选框、Layers3 分组标识/空状态、Plus 新建、Trash2 删除。
@@ -37,6 +36,18 @@ const draftSkills = ref([]);
 const selectedGroup = computed(() =>
   store.groups.find((group) => group.id === selectedId.value),
 );
+// 当前草稿是否尚未保存；切换分组前用于防止用户输入被静默覆盖。
+const draftDirty = computed(() => {
+  if (!selectedId.value) return false;
+  if (!selectedGroup.value) return selectedId.value.startsWith("group-new-");
+  const currentIds = [...(selectedGroup.value.skillIds || [])].sort();
+  const draftIds = [...draftSkills.value].sort();
+  return (
+    draftName.value.trim() !== selectedGroup.value.name ||
+    currentIds.length !== draftIds.length ||
+    currentIds.some((id, index) => id !== draftIds[index])
+  );
+});
 
 // 异步加载配置后自动选择第一个分组，同时保持当前有效选择。
 // immediate 保证首次渲染时就有默认选中项；deep 保证分组内容变化也能重新校验。
@@ -71,7 +82,8 @@ watch(
  * 进入“新建分组”状态：生成临时 id，并清空名称与勾选项。
  * 临时 id 前缀是 group-new-，保存时会被替换为正式的 group- 前缀。
  */
-function createGroup() {
+async function createGroup() {
+  if (!(await confirmDiscardDraft())) return;
   selectedId.value = `group-new-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
   draftName.value = "新分组";
   draftSkills.value = [];
@@ -82,8 +94,20 @@ function createGroup() {
  *
  * @param {{id: string, name: string, skillIds: string[]}} group - 被点击的分组
  */
-function selectGroup(group) {
+async function selectGroup(group) {
+  if (group.id === selectedId.value || !(await confirmDiscardDraft())) return;
   selectedId.value = group.id;
+}
+
+/** 草稿有改动时确认是否放弃，未改动则直接允许切换。 */
+async function confirmDiscardDraft() {
+  if (!draftDirty.value) return true;
+  return store.confirm({
+    title: "放弃未保存的修改？",
+    message: "当前分组还有未保存的内容，切换后这些修改将丢失。",
+    confirmText: "放弃修改",
+    tone: "danger",
+  });
 }
 
 /**
@@ -123,7 +147,7 @@ async function save() {
         },
       ];
   try {
-    // 保存分组后服务端会按新分组重建受影响的 Agent 受管链接，前端无需再手动同步。
+    // 分组只保存组合关系；Agent 已启用的 Skills 仍以 enabledSkills 为唯一真值。
     await store.saveGroups(next);
     // 新建完成后把选中项指向该分组，界面从“空草稿”切换为真实分组。
     if (!selectedGroup.value) selectedId.value = next[next.length - 1].id;
@@ -132,7 +156,7 @@ async function save() {
 
 /**
  * 删除分组：先弹确认框，确认后提交新列表并回退到剩余分组中的第一个。
- * 组内 Skills 的仓库源文件不会被删除，只会同步移除 Agent 目录下不再需要的链接。
+ * 组内 Skills 的仓库源文件和 Agent 当前启用状态都不会被删除。
  *
  * @returns {Promise<void>} 用户取消或删除完成后结束
  * @throws {never} 不向外抛出异常，失败提示统一由 store.execute 给出
@@ -141,7 +165,7 @@ async function remove() {
   if (!selectedGroup.value) return;
   const accepted = await store.confirm({
     title: "删除分组",
-    message: `确定删除“${selectedGroup.value.name}”吗？已应用该组的 Agent 会同步移除不再需要的链接。`,
+    message: `确定删除“${selectedGroup.value.name}”吗？这不会关闭 Agent 已启用的 Skills。`,
     confirmText: "删除",
     tone: "danger",
   });
@@ -178,11 +202,11 @@ async function remove() {
     <!-- 主体两栏布局：左侧 230px 分组列表，右侧自适应编辑器 -->
     <div
       v-if="store.groups.length || selectedId"
-      class="grid min-h-0 flex-1 grid-cols-[230px_minmax(0,1fr)] gap-4 pb-7.5"
+      class="grid min-h-0 flex-1 grid-cols-[230px_minmax(0,1fr)] gap-4 pb-7.5 max-[760px]:grid-cols-1"
     >
       <!-- 左侧：分组列表，每项显示名称与包含的 Skills 数量 -->
       <aside
-        class="min-h-0 overflow-y-auto rounded-xl border border-border bg-surface p-2 shadow-sm"
+        class="min-h-0 overflow-y-auto rounded-xl border border-border bg-surface p-2 shadow-sm max-[760px]:max-h-48"
       >
         <button
           v-for="group in store.groups"
@@ -224,6 +248,7 @@ async function remove() {
             ><input
               id="group-name"
               v-model="draftName"
+              maxlength="120"
               class="h-10 w-full rounded-md border border-border-strong bg-surface px-3 text-ink outline-none placeholder:text-ink-muted focus:border-primary focus:ring-2 focus:ring-primary-soft"
               placeholder="例如：前端开发"
             />

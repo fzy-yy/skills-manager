@@ -91,7 +91,16 @@ onMounted(() => {
 
     <!-- 页面出口：五个业务页面（Skills 仓库、分组管理、应用配置、Agents、设置）都在此渲染 -->
     <!-- 主内容区：min-h-0 保证内部滚动生效，overflow-auto 承载各页面的长内容 -->
-    <main class="min-h-0 flex-1 overflow-auto"><RouterView /></main>
+    <main class="min-h-0 flex-1 overflow-auto">
+      <RouterView v-if="store.ready" />
+      <div
+        v-else
+        class="grid min-h-full place-items-center p-6 text-sm font-semibold text-ink-muted"
+        role="status"
+      >
+        正在读取本地配置…
+      </div>
+    </main>
 
     <!-- 提示层数据来源：appStore.notify() 推送的 notices，最多保留 20 条、相同内容去重、error 类型保留更久 -->
     <!-- 全局提示层：右下角浮层，可滚动；aria-live 让读屏软件播报新提示 -->

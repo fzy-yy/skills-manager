@@ -139,6 +139,7 @@ async function remove(agent) {
         ><input
           id="agent-name"
           v-model="name"
+          maxlength="120"
           class="h-10 w-full rounded-md border border-border-strong bg-surface px-3 text-ink outline-none placeholder:text-ink-muted focus:border-primary focus:ring-2 focus:ring-primary-soft"
           placeholder="例如：Codex"
         />

@@ -14,7 +14,7 @@
 // 警示图标（对话框头部）与关闭图标。
 import { AlertTriangle, X } from "@lucide/vue";
 // 挂载/卸载时注册与注销全局键盘监听。
-import { onBeforeUnmount, onMounted } from "vue";
+import { nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 
 // ============ 二、组件接口 ============
 // 单向数据流：dialog 由 appStore 持有，本组件只读；如果在子组件里改它会绕开 resolveDialog，导致 Promise 永远不结束。
@@ -22,6 +22,10 @@ import { onBeforeUnmount, onMounted } from "vue";
 const props = defineProps({ dialog: { type: Object, required: true } });
 // 用户选择结果事件：参数为布尔值，true 表示确认。
 const emit = defineEmits(["resolve"]);
+// 对话框容器用于收集可聚焦元素；关闭后恢复打开前的焦点。
+const dialogPanel = ref(null);
+const confirmButton = ref(null);
+let previousActiveElement;
 
 // ============ 三、键盘交互与生命周期 ============
 /**
@@ -32,11 +36,49 @@ const emit = defineEmits(["resolve"]);
  */
 // 支持 Escape 取消，避免对话框只能依赖鼠标操作。
 function handleKeydown(event) {
-  if (props.dialog.open && event.key === "Escape") emit("resolve", false);
+  if (!props.dialog.open) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    emit("resolve", false);
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = [
+    ...(dialogPanel.value?.querySelectorAll(
+      'button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex="-1"])',
+    ) || []),
+  ];
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (!dialogPanel.value?.contains(document.activeElement)) {
+    event.preventDefault();
+    (event.shiftKey ? last : first).focus();
+  } else if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
 }
 // 使用 window 级别的 keydown 监听，保证焦点不在对话框内部时 Esc 依然生效。
 onMounted(() => window.addEventListener("keydown", handleKeydown));
 onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
+watch(
+  () => props.dialog.open,
+  async (open) => {
+    if (open) {
+      previousActiveElement = document.activeElement;
+      await nextTick();
+      confirmButton.value?.focus();
+    } else if (previousActiveElement?.isConnected) {
+      await nextTick();
+      previousActiveElement.focus();
+      previousActiveElement = undefined;
+    }
+  },
+);
 // 注意：Esc 只在 dialog.open 为真时处理，否则会拦截页面上其他依赖 Esc 的交互行为。
 </script>
 
@@ -52,9 +94,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
       role="presentation"
       @click.self="emit('resolve', false)"
     >
-      <!-- 约束：本组件不做完整焦点陷阱（focus trap），仅依靠 autofocus 把初始焦点交给确认按钮 -->
       <!-- 对话框主体：alertdialog 语义 + aria-modal，便于读屏软件正确播报 -->
       <section
+        ref="dialogPanel"
         class="w-full max-w-md rounded-xl border border-border bg-surface-raised p-5 shadow-2xl"
         role="alertdialog"
         aria-modal="true"
@@ -104,6 +146,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", handleKeydown));
             {{ dialog.cancelText }}
           </button>
           <button
+            ref="confirmButton"
             class="inline-flex h-10 items-center justify-center rounded-md border px-4 font-semibold text-on-primary"
             :class="
               dialog.tone === 'danger'
