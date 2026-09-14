@@ -1,36 +1,14 @@
-<!--
-  AgentsView —— Agents 管理页。
-
-  页面职责：维护「Agent 名称 + 其 Skills 目录」两组信息。这里的目录是各个
-  AI Agent（如 Codex、Claude 等）实际读取 Skills 的位置，本应用会在这些目录
-  下创建指向统一仓库的链接（见“应用配置”页面）。
-
-  表单同时承担新增与编辑：
-  - editingId 为空表示新增，点击“编辑”后填入该 Agent 的 id/名称/目录；
-  - 保存时把 id 一并提交，preload 服务据此判断是更新还是新增；
-  - 修改目录会先保存可恢复检查点，再安全清理旧目录链接并应用新目录。
--->
 <script setup>
-// 图标：Bot 表示 Agent，Pencil 编辑，Trash2 删除。
 import { Bot, Pencil, Trash2 } from "@lucide/vue";
-// ref 保存编辑态与被编辑 Agent 的表单字段。
 import { ref } from "vue";
-// 空状态占位组件。
 import EmptyState from "../components/EmptyState.vue";
-// 页面统一页头。
 import PageHeader from "../components/PageHeader.vue";
-// 目录输入 + 浏览按钮组件。
 import PathPicker from "../components/PathPicker.vue";
-// 全局状态仓库。
 import { useAppStore } from "../stores/appStore";
 
-// 全局状态仓库：Agent 增删改、系统目录选择、全局提示与忙碌标记均由它提供。
 const store = useAppStore();
-// 正在编辑的 Agent id；空字符串表示新增模式。
 const editingId = ref("");
-// 表单：Agent 名称。
 const name = ref("");
-// 表单：Agent 的 Skills 目录绝对路径。
 const directory = ref("");
 
 /**
@@ -81,7 +59,6 @@ async function save() {
   if (!name.value.trim() || !directory.value.trim())
     return store.notify("请完整填写 Agent 名称和 Skills 目录", "error");
   try {
-    // id 为空即新增、有值即更新：服务端以 id 是否存在区分两种写入路径。
     await store.upsertAgent({
       id: editingId.value || undefined,
       name: name.value,
@@ -108,7 +85,6 @@ async function remove(agent) {
   });
   if (!accepted) return;
   try {
-    // 服务端会删除该 Agent 记录，并只清理由本应用创建的受管链接。
     await store.deleteAgent(agent.id);
     if (editingId.value === agent.id) reset();
   } catch (_) {}
@@ -116,18 +92,15 @@ async function remove(agent) {
 </script>
 
 <template>
-  <!-- 页面容器：限宽居中 -->
   <section
     class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
   >
-    <!-- 页头：说明 Agents 页管理的是“Agent 名称 + 其 Skills 目录”这组信息 -->
     <PageHeader
       eyebrow="目标管理"
       title="Agents"
       description="保存 Agent 名称及其 Skills 目录，供应用配置使用。"
     />
 
-    <!-- 表单卡片：名称 + 目录 + 操作按钮；窄窗口（<760px）改为单列堆叠 -->
     <div
       class="grid grid-cols-[190px_minmax(0,1fr)_auto] items-end gap-3 rounded-xl border border-border bg-surface p-5 shadow-sm max-[760px]:grid-cols-1"
     >
@@ -157,12 +130,12 @@ async function remove(agent) {
           @browse="browse"
         />
       </div>
-      <!-- 编辑模式下额外显示“取消”按钮；保存按钮文案随模式变化 -->
       <div class="flex justify-end gap-2">
         <button
           v-if="editingId"
           class="inline-flex h-10 items-center justify-center rounded-md border border-border bg-surface px-4 font-semibold text-ink-secondary hover:bg-canvas"
           type="button"
+          :disabled="store.busy"
           @click="reset"
         >
           取消
@@ -178,7 +151,6 @@ async function remove(agent) {
       </div>
     </div>
 
-    <!-- Agent 列表：名称、目录、链接数量统计与编辑/删除按钮 -->
     <div v-if="store.agents.length" class="mt-4 grid gap-2">
       <article
         v-for="agent in store.agents"
@@ -195,30 +167,26 @@ async function remove(agent) {
             agent.directory || "当前设备尚未配置目录"
           }}</span>
         </div>
-        <!-- 链接数量：受管链接 + 外部已存在的同源手动链接 -->
-        <span
-          class="rounded-full border border-primary-border bg-primary-soft px-2.5 py-1.5 text-xs font-semibold whitespace-nowrap text-primary"
-          >{{ agent.linkedCount }} 个链接</span
-        >
         <button
-          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary"
+          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           title="编辑"
+          :disabled="store.busy"
           @click="edit(agent)"
         >
           <Pencil :size="17" :stroke-width="1.8" />
         </button>
         <button
-          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-danger hover:bg-danger-soft hover:text-danger"
+          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-danger hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           title="删除"
+          :disabled="store.busy"
           @click="remove(agent)"
         >
           <Trash2 :size="17" :stroke-width="1.8" />
         </button>
       </article>
     </div>
-    <!-- 空状态：还没有配置任何 Agent -->
     <EmptyState
       v-else
       :icon="Bot"

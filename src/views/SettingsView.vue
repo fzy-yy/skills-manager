@@ -1,43 +1,24 @@
-<!--
-  SettingsView —— 设置页。
-
-  包含两个功能：
-  1. 外观主题：浅色 / 深色切换，立即生效并写入 uTools 本地数据库；
-  2. 数据管理：清除 uTools 本地数据库中的插件配置，并移除本应用创建的
-     Agent Skills 链接（统一仓库中的源文件不会被删除）。
-
-  说明：清除数据是破坏性操作，必须先经过 appStore.confirm 二次确认。
--->
 <script setup>
-// 图标：Database 数据管理、Moon/Sun 主题选项、Palette 外观、Trash2 清除数据。
 import { Database, Moon, Palette, Sun, Trash2 } from "@lucide/vue";
-// 页面统一页头。
 import PageHeader from "../components/PageHeader.vue";
-// 全局状态仓库（主题状态与所有动作方法）。
 import { useAppStore } from "../stores/appStore";
 
-// 全局状态仓库：主题读写、清除本地数据、全局提示与确认对话框均由它提供。
 const store = useAppStore();
-// 主题选项：value 与 store.theme 对应，icon 由模板动态渲染。
-// 选项内容是静态常量，用普通数组即可，不需要 ref/computed。
 const themeOptions = [
   { value: "light", label: "浅色", icon: Sun },
   { value: "dark", label: "深色", icon: Moon },
 ];
 
-// 主题选择立即生效，并由 preload 服务写入 uTools 本地数据库。
 /**
- * 切换外观主题：先乐观更新界面，再持久化到 uTools 本地数据库。
+ * 切换外观主题：先乐观更新界面，再持久化到本地配置文件。
  * 持久化失败时 store.setTheme 会回滚主题，因此这里仅在成功时提示。
  *
  * @param {'light'|'dark'} theme - 目标主题
  * @returns {Promise<void>} 保存成功或回滚后结束
  */
 async function selectTheme(theme) {
-  // 点击当前已选主题时不做任何处理，避免多余的数据库写入。
   if (store.theme === theme) return;
   const saved = await store.setTheme(theme);
-  // 仅在保存成功时提示，失败时 setTheme 内部已给出错误提示并回滚主题。
   if (saved) store.notify("主题设置已保存");
 }
 
@@ -58,25 +39,21 @@ async function clearData() {
   });
   if (!accepted) return;
   try {
-    // 成功后服务端返回清空后的状态，仓库路径、分组、Agent 与主题都会随之复位。
     await store.clearData();
   } catch (_) {}
 }
 </script>
 
 <template>
-  <!-- 页面容器：限宽居中 -->
   <section
     class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
   >
-    <!-- 页头：本页只做偏好与数据管理，不涉及仓库文件操作 -->
     <PageHeader
       eyebrow="个性设置"
       title="设置"
       description="调整界面显示偏好并管理本地数据。"
     />
 
-    <!-- 外观主题卡片：左侧说明，右侧分段按钮；窄窗口（<560px）改为纵向排列 -->
     <div
       class="flex items-center gap-4 rounded-xl border border-border bg-surface p-4 shadow-sm max-[560px]:flex-col max-[560px]:items-stretch"
     >
@@ -92,7 +69,6 @@ async function clearData() {
           </p>
         </div>
       </div>
-      <!-- 主题分段按钮：选中项使用白色卡片底 + 主色文字；aria-pressed 反映当前状态 -->
       <div class="flex shrink-0 rounded-lg border border-border bg-canvas p-1">
         <button
           v-for="option in themeOptions"
@@ -115,7 +91,6 @@ async function clearData() {
       </div>
     </div>
 
-    <!-- 数据管理卡片：危险操作区，操作进行中（store.busy）时禁用按钮 -->
     <div class="mt-4 rounded-xl border border-border bg-surface p-5 shadow-sm">
       <div class="flex items-center gap-4">
         <span
@@ -125,8 +100,8 @@ async function clearData() {
         <div class="min-w-0 flex-1">
           <h2 class="m-0 text-base font-semibold text-ink">数据管理</h2>
           <p class="mt-1 mb-0 text-xs leading-5 text-ink-muted">
-            清除 uTools 本地数据库中的插件配置，并移除本应用创建的 Agent Skills
-            链接。
+            清除当前设备上 uTools 数据目录中的插件配置，并移除本应用创建的 Agent
+            Skills 链接；数据不会在设备间同步。
           </p>
         </div>
         <button

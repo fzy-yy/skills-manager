@@ -8,7 +8,7 @@
     {
       "code": "skills-manager",
       "explain": "管理统一 Skills 仓库、分组与 Agent 链接",
-      "cmds": ["Skills 管理器", "技能管理", "Agent Skills"]
+      "cmds": ["Skills 管理器"]
     }
   ]
 }

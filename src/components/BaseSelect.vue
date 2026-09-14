@@ -1,19 +1,5 @@
-<!--
-  BaseSelect —— 无依赖的基础下拉选择组件。
-
-  设计要点：
-  1. 使用 v-model 双向绑定（modelValue + update:modelValue），可直接替代原生 select；
-  2. 浮层由自身状态 open 控制，不使用原生 select，以便完全复用主题令牌与深色模式；
-  3. 监听 document 的 mousedown 事件，点击组件外部时自动收起浮层。
-
-  使用方式（参考 ApplicationsView.vue）：
-  <BaseSelect v-model="selectedAgentId" :options="agentOptions" placeholder="选择 Agent" />
--->
 <script setup>
-// ============ 一、依赖导入 ============
-// lucide 图标：下拉箭头（触发按钮）与勾选标记（当前选中项）。
 import { Check, ChevronDown } from "@lucide/vue";
-// computed 计算当前选中项；onMounted/onBeforeUnmount 注册与注销全局点击监听。
 import {
   computed,
   nextTick,
@@ -24,38 +10,22 @@ import {
   useId,
 } from "vue";
 
-// ============ 二、组件接口（props / emits） ============
-// 组件属性定义。
 const props = defineProps({
-  // 当前选中值（v-model），支持字符串或数字，与 option.value 全等比较。
   modelValue: { type: [String, Number], default: "" },
-  // 可选项列表，元素结构为 { label: string, value: string|number }。
   options: { type: Array, default: () => [] },
-  // 未选中任何项时显示的占位文案。
   placeholder: { type: String, default: "请选择" },
-  // 是否禁用（禁用时按钮置灰且不可展开）。
   disabled: Boolean,
 });
-// 约定：只抛 update:modelValue，不另外抛 change，父组件直接用 v-model 即可拿到完整能力。
-// 向外抛出 v-model 更新事件。
 const emit = defineEmits(["update:modelValue"]);
-// ============ 三、内部状态 ============
-// 组件根元素引用，用于判断点击是否发生在组件内部。
 const root = ref(null);
-// 触发按钮与选项按钮引用用于键盘导航和关闭后的焦点恢复。
 const trigger = ref(null);
 const optionButtons = ref([]);
 const listboxId = useId();
-// 浮层展开状态。
 const open = ref(false);
-// 易踩坑：这里用全等比较，因此 option.value 的类型必须与 v-model 传入的类型一致
-//（字符串 "1" 和数字 1 不相等），否则会一直显示占位文案。
-// 根据 modelValue 反查选项对象，用于展示选中项的 label。
 const selected = computed(() =>
   props.options.find((option) => option.value === props.modelValue),
 );
 
-// ============ 四、交互方法与全局事件监听 ============
 /**
  * 选中某个选项：同步给父组件并收起浮层。
  *
@@ -130,28 +100,20 @@ async function focusByTypeahead(event) {
  *
  * @param {MouseEvent} event - document 上的 mousedown 事件对象
  */
-// 点击组件外部时关闭浮层，避免残留遮挡其他内容。
 function handleOutsideClick(event) {
   if (root.value && !root.value.contains(event.target)) open.value = false;
 }
-// 监听 mousedown 而非 click：按下阶段就能收起浮层，不会与选项自身的 click 选中逻辑互相干扰。
-// 浮层是普通 DOM 节点而非 Portal，因此用全局 mousedown 判断“外部点击”。
 onMounted(() => document.addEventListener("mousedown", handleOutsideClick));
-// 每次选项列表重绘前清空元素引用，避免列表缩短后键盘导航命中已卸载节点。
 onBeforeUpdate(() => {
   optionButtons.value = [];
 });
-// 组件卸载时必须移除监听，防止内存泄漏与已销毁组件被访问。
 onBeforeUnmount(() =>
   document.removeEventListener("mousedown", handleOutsideClick),
 );
 </script>
 
 <template>
-  <!-- 无障碍约定：触发按钮充当 listbox 的入口，listbox/option 语义由浮层与选项元素承担 -->
-  <!-- 根容器：relative 为绝对定位的浮层提供定位参照 -->
   <div ref="root" class="relative w-full">
-    <!-- 触发按钮：展示当前选中项或占位文案，并声明 listbox 语义 -->
     <button
       ref="trigger"
       type="button"
@@ -179,16 +141,12 @@ onBeforeUnmount(() =>
         :stroke-width="1.8"
       />
     </button>
-    <!-- 不使用 Teleport：浮层需要跟随触发器宽度（w-full），必须留在同一层叠上下文内 -->
-    <!-- 选项浮层：z-30 高于页面内容，height 上限 240px 且超出可滚动 -->
     <div
       v-if="open"
       :id="listboxId"
       class="absolute z-30 mt-1.5 grid max-h-60 w-full gap-1 overflow-y-auto rounded-lg border border-border bg-surface-raised p-1.5 shadow-xl"
       role="listbox"
     >
-      <!-- 选中态同时使用颜色与勾选图标，避免仅靠颜色传达状态，保证色弱用户也能分辨 -->
-      <!-- 单个选项：选中项使用主色底强调，并显示勾选图标 -->
       <button
         v-for="(option, index) in options"
         :ref="(element) => setOptionRef(element, index)"
