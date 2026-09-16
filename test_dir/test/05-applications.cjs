@@ -12,6 +12,7 @@ const {
   createHarness,
   listLinks,
   removeDirectoryTree,
+  renameWithRetry,
 } = require("./helpers/harness.cjs");
 const { createReporter } = require("./helpers/reporter.cjs");
 
@@ -149,7 +150,7 @@ async function main() {
   storedFinal.enabledSkills[agentId] = ["alpha"];
   harness.writeStoredState(JSON.stringify(storedFinal));
   const movedAgentDir = path.join(TEST_DIR, ".tmp-agent-moved");
-  fs.renameSync(AGENT1, movedAgentDir);
+  await renameWithRetry(AGENT1, movedAgentDir);
   state = await api.setAgentSkills(agentId, ["alpha", "beta"]);
   reporter.check(
     "5.16",
@@ -158,7 +159,7 @@ async function main() {
       listLinks(movedAgentDir).length === 0,
     JSON.stringify(state.issues.map((issue) => issue.message)),
   );
-  fs.renameSync(movedAgentDir, AGENT1);
+  await renameWithRetry(movedAgentDir, AGENT1);
 
   // [5.19] 源目录被删除（未刷新）：链接成为悬空；刷新后被清理
   state = await api.setAgentSkills(agentId, ["alpha"]);

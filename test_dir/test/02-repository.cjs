@@ -14,6 +14,7 @@ const {
   listLinks,
   resetRepository,
   removeDirectoryTree,
+  renameWithRetry,
 } = require("./helpers/harness.cjs");
 const { createReporter } = require("./helpers/reporter.cjs");
 
@@ -304,7 +305,7 @@ async function main() {
   );
 
   // [2.3.7] 目录改名：旧 Skill 消失、旧链接（悬空）被清理
-  fs.renameSync(path.join(REPO_DIR, "alpha"), path.join(REPO_DIR, "alpha-new"));
+  await renameWithRetry(path.join(REPO_DIR, "alpha"), path.join(REPO_DIR, "alpha-new"));
   state = await api.refresh();
   reporter.check(
     "2.3.7",
@@ -415,7 +416,7 @@ async function main() {
 
   // [2.3.11] 仓库被移动：报错且保留缓存
   const movedRepo = path.join(TEST_DIR, ".tmp-repo-moved");
-  fs.renameSync(REPO_DIR, movedRepo);
+  await renameWithRetry(REPO_DIR, movedRepo);
   state = await api.refresh();
   reporter.check(
     "2.3.11",
@@ -429,7 +430,29 @@ async function main() {
     state.skills.length === 3,
     JSON.stringify(state.skills.map((skill) => skill.id)),
   );
-  fs.renameSync(movedRepo, REPO_DIR);
+  await renameWithRetry(movedRepo, REPO_DIR);
+
+  reporter.section("2.4 Skills 卡片交互（双击打开文件夹）");
+  state = await api.refresh();
+  const cachedAlpha = state.skills.find((skill) => skill.id === "alpha");
+  await api.openSkillFolder("alpha");
+  reporter.check(
+    "2.4.1",
+    "打开的是该 Skill 的源目录",
+    Boolean(cachedAlpha) && harness.openedPaths.at(-1) === cachedAlpha.sourcePath,
+    JSON.stringify({
+      opened: harness.openedPaths.at(-1),
+      expected: cachedAlpha?.sourcePath,
+    }),
+  );
+  const openError = await captureError(() => api.openSkillFolder("no-such-skill"));
+  reporter.check(
+    "2.4.1",
+    "未缓存的 Skill 报错",
+    Boolean(openError?.message.includes("未找到该 Skill")),
+    openError?.message,
+  );
+  reporter.skip("2.4.2", "卡片双击绑定与悬停样式属前端行为，人工验证");
 
   // 需要权限或 UI 行为的场景
   reporter.skip("2.1.2", "按钮禁用属前端行为，人工验证");

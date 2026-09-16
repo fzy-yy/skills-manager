@@ -40,6 +40,8 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 
 - 图标只从 `@lucide/vue` 导入（不是 lucide-vue-next）
 - 只用 `src/main.css` 中的 Tailwind 语义类（bg-canvas、text-ink、border-border 等），禁止硬编码色值；深色主题靠 `<html class="dark">` 开关；Tailwind v4 没有 tailwind.config.js / postcss.config.js
+- 页面布局统一为「顶部固定 + 内容区独立滚动」：视图根元素用 `h-full` + `overflow-hidden`，内部滚动区用 `min-h-0 flex-1 overflow-y-auto`；App.vue 的 main 是 `overflow-hidden`，不允许整页滚动
+- 滚动条已全局隐藏（`src/main.css` 的 `::-webkit-scrollbar { display: none }`），勿写 `overflow: hidden` 禁用滚动能力
 - 路由用 `createMemoryHistory`（uTools 从本地文件加载页面）
 - skill 开关是「乐观更新 + 300ms 防抖 + 失败回滚」，preload 侧写操作全局串行；勿在开关路径上引入同步等待
 
@@ -48,3 +50,4 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 - 改代码前先读 `doc/用户操作与异常场景.md`：里面是按用户视角整理的全部预期行为、防护清单与测试要点；修改错误处理时对照它，行为有变化时同步更新文档与 `test_dir` 中对应编号的测试断言
 - 改 preload 逻辑后：`node test_dir/test/run-all.cjs` 跑自动化回归（纯 Node、无框架），再跑 `pnpm build` 并在 uTools 开发者工具中重载插件人工验证 UI 行为（测试中 SKIP 的场景）
 - 单个模块可独立运行（如 `node test_dir/test/02-repository.cjs`）；测试产物在 `test_dir/.user-data/`，agents1-3 为测试沙箱，勿放真实数据
+- 测试可与 dev server 同时运行：vite 已配置忽略 `test_dir`（否则 Windows 上 watcher 会锁住测试目录导致重命名报 EPERM）

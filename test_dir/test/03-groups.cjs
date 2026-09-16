@@ -74,15 +74,56 @@ async function main() {
     JSON.stringify(state.groups[0]),
   );
 
-  // [3.9] 允许重名分组
+  // [3.9] 分组重名：自动追加递增序号，保证名称唯一
   state = await api.saveGroups([
     { id: "group-5", name: "同名组", skillIds: [] },
     { id: "group-6", name: "同名组", skillIds: [] },
+    { id: "group-7", name: "同名组", skillIds: [] },
   ]);
   reporter.check(
     "3.9",
-    "两个同名分组可以共存",
-    state.groups.filter((group) => group.name === "同名组").length === 2,
+    "重名分组自动追加递增序号",
+    state.groups.map((group) => group.name).join("|") ===
+      "同名组|同名组 (2)|同名组 (3)",
+    JSON.stringify(state.groups.map((group) => group.name)),
+  );
+  reporter.check(
+    "3.9",
+    "给出自动重命名提示",
+    state.issues.some((issue) => issue.message.includes("已自动添加序号")),
+    JSON.stringify(state.issues.map((issue) => issue.message)),
+  );
+
+  // [3.9] 原样再次保存：名称保持稳定，不继续追加序号
+  state = await api.saveGroups(
+    state.groups.map((group) => ({
+      id: group.id,
+      name: group.name,
+      skillIds: group.skillIds,
+    })),
+  );
+  reporter.check(
+    "3.9",
+    "重复保存不继续追加序号",
+    state.groups.map((group) => group.name).join("|") ===
+      "同名组|同名组 (2)|同名组 (3)",
+    JSON.stringify(state.groups.map((group) => group.name)),
+  );
+
+  // [3.9] 编辑改名撞已有名称：自动重命名
+  await api.saveGroups([
+    { id: "group-5", name: "甲", skillIds: [] },
+    { id: "group-6", name: "乙", skillIds: [] },
+  ]);
+  state = await api.saveGroups([
+    { id: "group-5", name: "甲", skillIds: [] },
+    { id: "group-6", name: "甲", skillIds: [] },
+  ]);
+  reporter.check(
+    "3.9",
+    "编辑改名与已有分组冲突时自动重命名",
+    state.groups.map((group) => group.name).join("|") === "甲|甲 (2)",
+    JSON.stringify(state.groups.map((group) => group.name)),
   );
 
   // [3.4 补充] 重复 id 被拒绝
@@ -124,6 +165,27 @@ async function main() {
       state.groups[0].skillIds[0] === "alpha" &&
       state.issues.some((issue) => issue.message.includes("分组“仅保留的组”")),
     JSON.stringify({ groups: state.groups, issues: state.issues }),
+  );
+
+  // [3.12] 历史配置中的重名分组：读取时自动重命名并提示
+  const stored = harness.readStoredState();
+  stored.groups = [
+    { id: "legacy-1", name: "历史组", skillIds: [] },
+    { id: "legacy-2", name: "历史组", skillIds: [] },
+  ];
+  harness.writeStoredState(JSON.stringify(stored));
+  const reread = await api.getState();
+  reporter.check(
+    "3.12",
+    "历史配置中的重名分组读取时自动重命名",
+    reread.groups.map((group) => group.name).join("|") === "历史组|历史组 (2)",
+    JSON.stringify(reread.groups.map((group) => group.name)),
+  );
+  reporter.check(
+    "3.12",
+    "并给出自动重命名提示",
+    reread.issues.some((issue) => issue.message.includes("已自动添加序号")),
+    JSON.stringify(reread.issues.map((issue) => issue.message)),
   );
 
   // 前端状态机（新建草稿、脏检查、切换确认）与空状态属 UI，人工验证

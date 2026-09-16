@@ -12,6 +12,7 @@ const {
   createHarness,
   listLinks,
   removeDirectoryTree,
+  renameWithRetry,
 } = require("./helpers/harness.cjs");
 const { createReporter } = require("./helpers/reporter.cjs");
 
@@ -95,13 +96,20 @@ async function main() {
   );
   reporter.check("4.7", "不存在的目录被拒绝", Boolean(error?.message.includes("不存在或无法访问")), error?.message);
 
-  // [4.14] 重名 Agent 允许
+  // [4.14] 重名 Agent：自动追加递增序号
   state = await api.createAgent({ name: "Agent One", directory: AGENT2 });
   reporter.check(
     "4.14",
-    "两个同名 Agent 可以共存",
-    state.agents.filter((agent) => agent.name === "Agent One").length === 2,
+    "重名 Agent 自动追加递增序号",
+    state.agents.filter((agent) => agent.name.startsWith("Agent One")).length === 2 &&
+      state.agents.some((agent) => agent.name === "Agent One (2)"),
     JSON.stringify(state.agents.map((agent) => agent.name)),
+  );
+  reporter.check(
+    "4.14",
+    "给出自动重命名提示",
+    state.issues.some((issue) => issue.message.includes("已自动重命名为")),
+    JSON.stringify(state.issues.map((issue) => issue.message)),
   );
   const agentTwo = state.agents.find((agent) => agent.directory.toLowerCase().includes("agents2"));
 
@@ -145,6 +153,53 @@ async function main() {
     JSON.stringify(state.agents),
   );
   fs.mkdirSync(AGENT3, { recursive: true });
+
+  // [4.17] 历史配置中的重名 Agent：读取时自动重命名并提示
+  const legacyStored = harness.readStoredState();
+  legacyStored.agents = [
+    { id: "legacy-a1", name: "历史 Agent", directory: AGENT1 },
+    { id: "legacy-a2", name: "历史 Agent", directory: AGENT2 },
+  ];
+  harness.writeStoredState(JSON.stringify(legacyStored));
+  const legacyState = await api.getState();
+  reporter.check(
+    "4.17",
+    "历史配置中的重名 Agent 读取时自动重命名",
+    legacyState.agents.map((agent) => agent.name).join("|") ===
+      "历史 Agent|历史 Agent (2)",
+    JSON.stringify(legacyState.agents.map((agent) => agent.name)),
+  );
+  reporter.check(
+    "4.17",
+    "并给出自动重命名提示",
+    legacyState.issues.some((issue) => issue.message.includes("已自动添加序号")),
+    JSON.stringify(legacyState.issues.map((issue) => issue.message)),
+  );
+
+  // [4.18] 打开 Agent 目录（卡片按钮）
+  state = await api.createAgent({ name: "目录 Agent", directory: AGENT3 });
+  const folderAgent = state.agents.find((agent) => agent.name === "目录 Agent");
+  await api.openAgentFolder(folderAgent.id);
+  reporter.check(
+    "4.18",
+    "打开的是该 Agent 的 Skills 目录",
+    harness.openedPaths.at(-1) === folderAgent.directory,
+    JSON.stringify({
+      opened: harness.openedPaths.at(-1),
+      expected: folderAgent.directory,
+    }),
+  );
+  const movedForOpen = path.join(TEST_DIR, ".tmp-agent-open");
+  await renameWithRetry(AGENT3, movedForOpen);
+  const openAgentError = await captureError(() => api.openAgentFolder(folderAgent.id));
+  reporter.check(
+    "4.18",
+    "目录被移走时提示不存在",
+    Boolean(openAgentError?.message.includes("不存在或已被移动")),
+    openAgentError?.message,
+  );
+  await renameWithRetry(movedForOpen, AGENT3);
+  await api.deleteAgent(folderAgent.id);
 
   // [4.12] 单个链接删除失败：需要构造权限错误，代码走查
   reporter.skip("4.12", "需要构造删除权限错误，代码走查");

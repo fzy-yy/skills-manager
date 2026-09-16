@@ -12,6 +12,7 @@ const {
   createHarness,
   listLinks,
   removeDirectoryTree,
+  renameWithRetry,
 } = require("./helpers/harness.cjs");
 const { createReporter } = require("./helpers/reporter.cjs");
 
@@ -83,7 +84,7 @@ async function main() {
   const unavailableAgentId = state.agents[0].id;
   await api.setAgentSkills(unavailableAgentId, ["alpha"]);
   const movedDir = path.join(TEST_DIR, ".tmp-agent-moved");
-  fs.renameSync(AGENT1, movedDir);
+  await renameWithRetry(AGENT1, movedDir);
   state = await api.clearData();
   reporter.check(
     "6.4",

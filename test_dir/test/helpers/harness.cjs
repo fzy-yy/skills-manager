@@ -116,6 +116,37 @@ function resetAgents() {
 }
 
 /**
+ * 带重试的目录重命名。
+ *
+ * Windows 上刚被访问过的目录可能因短暂的文件句柄占用（杀毒扫描、搜索索引、
+ * 链接目标解析等）抛出 EPERM / EBUSY / EACCES，稍等后即可成功；
+ * 这类偶发失败不属于产品缺陷，测试侧统一用本函数规避。
+ *
+ * @param {string} from - 源路径
+ * @param {string} to - 目标路径
+ * @param {{retries?: number, delayMs?: number}} [options] - 重试次数与间隔
+ */
+async function renameWithRetry(from, to, { retries = 25, delayMs = 120 } = {}) {
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      fs.renameSync(from, to);
+      return;
+    } catch (error) {
+      const retryable = ["EPERM", "EBUSY", "EACCES"].includes(error?.code);
+      if (!retryable || attempt >= retries) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+/** 清理测试目录中的临时残留（.tmp-*），保证每次运行都从干净状态开始。 */
+function cleanTempArtifacts() {
+  for (const name of fs.readdirSync(TEST_DIR)) {
+    if (name.startsWith(".tmp-")) removeDirectoryTree(path.join(TEST_DIR, name));
+  }
+}
+
+/**
  * 列出目录中所有符号链接的名字（排序）。
  *
  * @param {string} directory - 目标目录
@@ -167,6 +198,8 @@ async function captureError(operation) {
  */
 function createHarness(name, options = {}) {
   const { resetRepo = true, resetAgentDirs = true } = options;
+  // 先清掉上次中断运行可能留下的临时目录，避免重命名目标已存在导致连锁失败。
+  cleanTempArtifacts();
   const userData = path.join(USER_DATA_DIR, name);
   removeDirectoryTree(userData);
   fs.mkdirSync(userData, { recursive: true });
@@ -175,10 +208,15 @@ function createHarness(name, options = {}) {
 
   /** 目录选择框的 mock 返回值，可通过 setDialogResult 调整。 */
   let dialogResult = [];
+  /** shellOpenPath（打开文件夹）的调用记录，供断言检查。 */
+  const openedPaths = [];
   global.window = {
     utools: {
       getPath: (target) => (target === "userData" ? userData : TEST_DIR),
       showOpenDialog: () => dialogResult,
+      shellOpenPath: (target) => {
+        openedPaths.push(target);
+      },
     },
   };
 
@@ -187,6 +225,7 @@ function createHarness(name, options = {}) {
 
   return {
     api,
+    openedPaths,
     userData,
     /** 本地配置文件路径（默认位置）。 */
     statePath: path.join(userData, "skills-manager", "state.json"),
@@ -215,12 +254,14 @@ module.exports = {
   REPO_DIR,
   TEST_DIR,
   captureError,
+  cleanTempArtifacts,
   clearDirectory,
   createHarness,
   createSkill,
   listEntries,
   listLinks,
   removeDirectoryTree,
+  renameWithRetry,
   resetAgents,
   resetRepository,
 };

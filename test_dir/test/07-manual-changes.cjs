@@ -11,6 +11,7 @@ const {
   createHarness,
   listLinks,
   removeDirectoryTree,
+  renameWithRetry,
 } = require("./helpers/harness.cjs");
 const { createReporter } = require("./helpers/reporter.cjs");
 
@@ -167,7 +168,7 @@ async function main() {
   reporter.section("外部环境变化");
   // [7.11] 移动 Agent 目录：刷新时该 Agent 报错且不清理（注意此时该 Agent 的目录是 AGENT2）
   const movedAgent = path.join(TEST_DIR, ".tmp-agent-moved");
-  fs.renameSync(AGENT2, movedAgent);
+  await renameWithRetry(AGENT2, movedAgent);
   state = await api.refresh();
   reporter.check(
     "7.11",
@@ -177,11 +178,11 @@ async function main() {
     ),
     JSON.stringify(state.issues.map((issue) => issue.message)),
   );
-  fs.renameSync(movedAgent, AGENT2);
+  await renameWithRetry(movedAgent, AGENT2);
 
   // [7.12] 移动仓库目录：报错；重新设置新路径后收敛
   const movedRepo = path.join(TEST_DIR, ".tmp-repo-moved");
-  fs.renameSync(REPO_DIR, movedRepo);
+  await renameWithRetry(REPO_DIR, movedRepo);
   state = await api.refresh();
   reporter.check(
     "7.12",
@@ -197,7 +198,7 @@ async function main() {
       !state.issues.some((issue) => issue.type === "error"),
     JSON.stringify(state.skills.map((skill) => skill.id)),
   );
-  fs.renameSync(movedRepo, REPO_DIR);
+  await renameWithRetry(movedRepo, REPO_DIR);
   await api.setRepository(REPO_DIR);
 
   // 需要特殊环境或人工验证的场景
