@@ -207,14 +207,9 @@ export const useAppStore = defineStore("app", () => {
     return run(() => backend().saveGroups(nextGroups), "分组已保存");
   }
 
-  /** 新建 Agent（目录必须为空）。 */
+  /** 新建 Agent（目录必须为空；保存后不可修改，只能删除重建）。 */
   function createAgent(input) {
     return run(() => backend().createAgent(input), "Agent 已添加");
-  }
-
-  /** 更新 Agent（改名或更换目录）。 */
-  function updateAgent(input) {
-    return run(() => backend().updateAgent(input), "Agent 已更新");
   }
 
   /** 删除 Agent，并取消其尚未提交的开关选择。 */
@@ -276,7 +271,6 @@ export const useAppStore = defineStore("app", () => {
     refreshSkills,
     saveGroups,
     createAgent,
-    updateAgent,
     deleteAgent,
     setAgentSkills,
     clearData,

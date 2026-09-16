@@ -68,7 +68,7 @@ async function confirmEmptyRepository() {
     <PageHeader
       eyebrow="统一来源"
       title="Skills 仓库"
-      description="扫描目录中的 SKILL.md，并读取元数据名称。"
+      description="检查仓库第一层子目录中的 SKILL.md，名称以元数据 name 为准。"
     >
       <div
         v-if="store.repositoryPath"
@@ -116,7 +116,7 @@ async function confirmEmptyRepository() {
         </button>
       </div>
       <p class="mt-2 mb-0 text-xs text-ink-muted">
-        会递归查找包含 SKILL.md 的目录；这里只读取文件，不会修改仓库内容。
+        只检查仓库目录下第一层子目录中的 SKILL.md，不递归更深层级；这里只读取文件，不会修改仓库内容。
       </p>
     </div>
 

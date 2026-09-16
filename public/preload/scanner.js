@@ -1,11 +1,12 @@
 /**
- * Skills 仓库扫描器：递归查找包含 SKILL.md 的目录，并解析元数据名称。
+ * Skills 仓库扫描器：检查仓库目录“第一层子目录”中的 SKILL.md，并解析元数据名称。
  *
  * 扫描规则（与界面说明保持一致）：
- *  - 某个子目录中存在 SKILL.md（文件名大小写不敏感）时，该目录即视为一个 Skill，且不再向下递归；
- *  - 仓库根目录只作为容器，即使含 SKILL.md 也不视为 Skill（避免漏掉全部子目录）；
- *  - 跳过符号链接目录、node_modules 与 .git 相关内容，避免死循环与无关内容；
- *  - 任一目录读取失败或达到遍历上限时，complete 置为 false，调用方据此停止同步链接。
+ *  - 只检查仓库根目录下的直接子目录，不递归更深层级；
+ *  - 子目录中存在 SKILL.md（文件名大小写不敏感）时视为一个 Skill，读取其元数据的 name；
+ *  - 子目录中没有 SKILL.md 时直接跳过，并提示该目录可能不是一个 Skill；
+ *  - 子目录读取失败或 SKILL.md 解析失败时，complete 置为 false，
+ *    调用方据此停止同步链接，避免把暂时无法确认的 Skill 当作“已删除”而清理链接。
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -17,9 +18,6 @@ const {
   withTimeout,
 } = require("./utils");
 
-/** 遍历上限：防止用户误选一个巨型目录导致扫描长时间占用。 */
-const MAX_SCAN_DIRECTORIES = 5_000;
-const MAX_SCAN_DEPTH = 32;
 /** 单次扫描最多逐条展示的问题数量，超出部分合并为一条提示。 */
 const MAX_SCAN_ISSUES = 20;
 /** SKILL.md 体积上限：元数据文件不应超过该大小。 */
@@ -83,7 +81,8 @@ async function readSkillName(skillFile) {
 }
 
 /**
- * 扫描指定仓库目录，找出所有有效的 Skill。
+ * 扫描指定仓库目录，找出其第一层子目录中所有有效的 Skill。
+ * Skill 的 id 与链接目录名均取子目录名（同一层内天然唯一）。
  *
  * @param {string} repositoryPath - 仓库根目录（来自配置，视为可信路径）
  * @returns {Promise<{skills: Array<{id: string, name: string, folderName: string, sourcePath: string}>, issues: Array, complete: boolean}>}
@@ -109,27 +108,34 @@ async function scanRepository(repositoryPath) {
     };
   }
 
-  const skills = [];
-  const pendingDirectories = [{ directory: root, depth: 0 }];
-  let visitedCount = 0;
-
-  while (pendingDirectories.length) {
-    const { directory, depth } = pendingDirectories.pop();
-    visitedCount += 1;
-    if (visitedCount > MAX_SCAN_DIRECTORIES) {
-      complete = false;
-      pushIssue(
+  let entries;
+  try {
+    entries = await withTimeout(
+      fs.promises.readdir(root, { withFileTypes: true }),
+      `扫描仓库目录 ${root}`,
+    );
+  } catch (error) {
+    return {
+      skills: [],
+      issues: [
         createIssue(
           "error",
-          `仓库目录超过 ${MAX_SCAN_DIRECTORIES} 个子目录，已停止扫描。请只选择专用的 Skills 仓库目录。`,
+          `无法读取仓库目录 ${root}：${errorMessage(error)}。为防止误删，本次不会清理缺失项。`,
         ),
-      );
-      break;
-    }
+      ],
+      complete: false,
+    };
+  }
 
-    let entries;
+  const skills = [];
+  for (const entry of entries) {
+    // 只检查第一层子目录；符号链接目录指向仓库外部，不参与扫描。
+    if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+    const directory = path.join(root, entry.name);
+
+    let childEntries;
     try {
-      entries = await withTimeout(
+      childEntries = await withTimeout(
         fs.promises.readdir(directory, { withFileTypes: true }),
         `扫描目录 ${directory}`,
       );
@@ -138,68 +144,44 @@ async function scanRepository(repositoryPath) {
       pushIssue(
         createIssue(
           "error",
-          `无法扫描目录 ${directory}：${errorMessage(error)}。为防止误删，本次不会清理缺失项。`,
+          `无法读取目录 ${directory}：${errorMessage(error)}。为防止误删，本次不会清理缺失项。`,
         ),
       );
       continue;
     }
 
-    // 子目录包含 SKILL.md 时视为一个 Skill，不再向下递归；根目录只作为容器。
-    const skillEntry =
-      depth > 0
-        ? entries.find(
-            (entry) => entry.isFile() && entry.name.toLowerCase() === "skill.md",
-          )
-        : undefined;
-    if (skillEntry) {
-      const skillFile = path.join(directory, skillEntry.name);
-      const result = await readSkillName(skillFile);
-      if (result.name) {
-        const relativePath =
-          path.relative(root, directory).split(path.sep).join("/") || ".";
-        skills.push({
-          id: relativePath,
-          name: result.name,
-          folderName: path.basename(directory),
-          sourcePath: directory,
-        });
-        continue;
-      }
-      complete = false;
+    const skillEntry = childEntries.find(
+      (item) => item.isFile() && item.name.toLowerCase() === "skill.md",
+    );
+    if (!skillEntry) {
       pushIssue(
-        createIssue("error", `${result.error}，该目录已忽略。为防止误删，本次不会清理缺失项。`),
+        createIssue(
+          "warning",
+          `目录“${entry.name}”中没有找到 SKILL.md，可能不是一个 Skill，已跳过。`,
+        ),
       );
+      continue;
     }
 
-    for (let index = entries.length - 1; index >= 0; index -= 1) {
-      const entry = entries[index];
-      const lowerName = entry.name.toLowerCase();
-      if (
-        !entry.isDirectory() ||
-        entry.isSymbolicLink() ||
-        lowerName === "node_modules" ||
-        lowerName.startsWith(".git")
-      )
-        continue;
-      if (depth >= MAX_SCAN_DEPTH) {
-        complete = false;
-        pushIssue(
-          createIssue(
-            "error",
-            `目录层级超过 ${MAX_SCAN_DEPTH} 层，已跳过 ${path.join(directory, entry.name)}。`,
-          ),
-        );
-        continue;
-      }
-      pendingDirectories.push({
-        directory: path.join(directory, entry.name),
-        depth: depth + 1,
+    const result = await readSkillName(path.join(directory, skillEntry.name));
+    if (result.name) {
+      skills.push({
+        id: entry.name,
+        name: result.name,
+        folderName: entry.name,
+        sourcePath: directory,
       });
+      continue;
     }
+    complete = false;
+    pushIssue(
+      createIssue("error", `${result.error}，该目录已忽略。为防止误删，本次不会清理缺失项。`),
+    );
   }
 
+  // 聚合提示直接追加：它本身不应再受条数上限影响，否则永远无法展示。
   if (omittedIssueCount)
-    pushIssue(
+    issues.push(
       createIssue(
         "warning",
         `另有 ${omittedIssueCount} 条扫描问题未逐条展示，请检查仓库目录权限与结构。`,

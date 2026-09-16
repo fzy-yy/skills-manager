@@ -106,13 +106,17 @@ function createSkillsManagerApi({ utools }) {
     const allIssues = [...issues, ...scan.issues];
 
     if (!scan.complete) {
-      if (state.cachedSkills.length)
-        allIssues.push(
-          createIssue(
-            "info",
-            "本次未完成扫描，Skills 列表显示的是上次成功扫描的结果。",
-          ),
-        );
+      // 扫描不完整时保持上次完整扫描的状态：不更新缓存、不清理引用、不同步链接，
+      // 避免把暂时无法确认的 Skill 当作“已删除”而清掉它的链接与选择记录。
+      // 用户修复问题后再次扫描即可恢复（若从未成功扫描过，列表为空并有错误提示）。
+      allIssues.push(
+        createIssue(
+          "info",
+          state.cachedSkills.length
+            ? "本次扫描未完全成功（存在无法读取或无法解析的目录），Skills 列表显示的是上次成功扫描的结果；未对分组与链接执行任何清理。"
+            : "本次扫描未完全成功，未获取到可用的 Skill 列表；请根据上方错误提示修复后重新扫描。",
+        ),
+      );
       return buildState(state, { skills: state.cachedSkills, issues: allIssues });
     }
 
@@ -190,12 +194,10 @@ function createSkillsManagerApi({ utools }) {
    *
    * @param {object} state - 当前配置
    * @param {string} directory - 已规范化的目标目录
-   * @param {string} currentAgentId - 正在编辑的 Agent id（允许与其自身目录相同）
    * @throws {Error} 目录不安全或已被占用时抛出
    */
-  function assertAgentDirectoryAvailable(state, directory, currentAgentId = "") {
+  function assertAgentDirectoryAvailable(state, directory) {
     for (const agent of state.agents) {
-      if (agent.id === currentAgentId) continue;
       if (pathsEqualLexical(agent.directory, directory))
         throw new Error(`该目录已由 Agent“${agent.name}”使用，请选择其他目录`);
     }
@@ -335,7 +337,11 @@ function createSkillsManagerApi({ utools }) {
     return buildState(state, { issues });
   }
 
-  /** 新建 Agent：名称非空、目录为空、目录未被占用且与仓库不重叠。 */
+  /**
+   * 新建 Agent：名称非空、目录为空、目录未被占用且与仓库不重叠。
+   * 保存后 Agent 信息不可修改（避免目录迁移带来的链接清理风险），
+   * 如需调整请删除后重新创建。
+   */
   async function createAgent(input) {
     const { state, issues } = await readState();
     const name = String(input?.name || "").trim();
@@ -354,51 +360,6 @@ function createSkillsManagerApi({ utools }) {
     state.enabledSkills[id] = [];
     await config.write(state);
     return buildState(state, { issues });
-  }
-
-  /**
-   * 更新 Agent。
-   * 仅改名时不动文件系统；目录变更时先清空旧目录中的链接，再把已启用 Skills 同步到新目录。
-   */
-  async function updateAgent(input) {
-    const { state, issues } = await readState();
-    const agent = state.agents.find((item) => item.id === input?.id);
-    if (!agent) throw new Error("未找到要编辑的 Agent，请刷新后重试");
-    const name = String(input?.name || "").trim();
-    if (!name) throw new Error("请输入 Agent 名称");
-    if (name.length > MAX_ENTITY_NAME_LENGTH)
-      throw new Error(`Agent 名称不能超过 ${MAX_ENTITY_NAME_LENGTH} 个字符`);
-    const directory = await normalizeDirectory(
-      input?.directory,
-      "Agent Skills 目录",
-    );
-
-    if (pathsEqualLexical(agent.directory, directory)) {
-      agent.name = name;
-      await config.write(state);
-      return buildState(state, { issues });
-    }
-
-    assertAgentDirectoryAvailable(state, directory, agent.id);
-    await assertDirectoryEmpty(directory);
-    const removal = await removeManagedLinks(agent, {
-      repositoryPath: state.repositoryPath,
-    });
-    issues.push(...removal.issues);
-    agent.name = name;
-    agent.directory = directory;
-    await config.write(state);
-
-    const result = await syncAgentLinks({
-      repositoryPath: state.repositoryPath,
-      skills: state.cachedSkills,
-      agent,
-      enabledSkillIds: state.enabledSkills[agent.id] || [],
-    });
-    return buildState(state, {
-      issues: [...issues, ...result.issues],
-      agentIssues: { [agent.id]: result.issues },
-    });
   }
 
   /** 删除 Agent：先清理其目录中由本插件创建的链接，再移除配置。 */
@@ -487,7 +448,6 @@ function createSkillsManagerApi({ utools }) {
     setAgentSkills,
     setRepository,
     setTheme,
-    updateAgent,
   };
 
   // 改动配置或文件系统的方法统一串行，读方法（getState）与目录选择不需要排队。
@@ -500,7 +460,6 @@ function createSkillsManagerApi({ utools }) {
     "setAgentSkills",
     "setRepository",
     "setTheme",
-    "updateAgent",
   ];
   for (const method of serializedMethods) {
     const operation = api[method].bind(api);

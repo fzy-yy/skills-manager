@@ -1,5 +1,5 @@
 <script setup>
-import { Bot, Pencil, Trash2 } from "@lucide/vue";
+import { Bot, Info, Trash2 } from "@lucide/vue";
 import { ref } from "vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -7,29 +7,13 @@ import PathPicker from "../components/PathPicker.vue";
 import { useAppStore } from "../stores/appStore";
 
 const store = useAppStore();
-const editingId = ref("");
 const name = ref("");
 const directory = ref("");
 
-/**
- * 重置表单为“新增模式”。
- * 新增成功后、取消编辑时都会调用。
- */
+/** 清空表单，供新增成功后复用。 */
 function reset() {
-  editingId.value = "";
   name.value = "";
   directory.value = "";
-}
-
-/**
- * 进入编辑模式：把该 Agent 的当前配置填入表单。
- *
- * @param {{id: string, name: string, directory: string}} agent - 被编辑的 Agent
- */
-function edit(agent) {
-  editingId.value = agent.id;
-  name.value = agent.name;
-  directory.value = agent.directory;
 }
 
 /**
@@ -42,43 +26,36 @@ async function browse() {
 }
 
 /**
- * 保存 Agent（新增或更新），成功后回到新增模式并清空表单。
+ * 创建 Agent。
  * 服务端会校验：目录必须存在、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合，
  * 且必须为空目录——保证目录中的 Skills 链接全部由本插件管理。
- * 保存失败时表单内容原样保留，便于用户修正后重试。
+ * 创建后不可修改（避免目录迁移带来的链接清理风险），如需调整请删除后重新创建。
+ * 失败时表单内容原样保留，便于用户修正后重试。
  */
 async function save() {
   if (!name.value.trim() || !directory.value.trim())
     return store.notify("请完整填写 Agent 名称和 Skills 目录", "error");
-  const saved = editingId.value
-    ? await store.updateAgent({
-        id: editingId.value,
-        name: name.value,
-        directory: directory.value,
-      })
-    : await store.createAgent({
-        name: name.value,
-        directory: directory.value,
-      });
+  const saved = await store.createAgent({
+    name: name.value,
+    directory: directory.value,
+  });
   if (saved) reset();
 }
 
 /**
  * 删除 Agent：确认后删除配置，并清理本应用在其目录创建的链接。
- * 若删除的正是当前编辑项，则同步重置表单。
  *
  * @param {{id: string, name: string}} agent - 被删除的 Agent
  */
 async function remove(agent) {
   const accepted = await store.confirm({
     title: "删除 Agent",
-    message: `确定删除“${agent.name}”吗？本应用在其目录创建的链接也会被安全移除。`,
+    message: `确定删除“${agent.name}”吗？本应用在其目录创建的链接也会被安全移除；如需重新使用，请重新创建 Agent。`,
     confirmText: "删除",
     tone: "danger",
   });
   if (!accepted) return;
-  const removed = await store.deleteAgent(agent.id);
-  if (removed && editingId.value === agent.id) reset();
+  await store.deleteAgent(agent.id);
 }
 </script>
 
@@ -123,27 +100,28 @@ async function remove(agent) {
       </div>
       <div class="flex justify-end gap-2">
         <button
-          v-if="editingId"
-          class="inline-flex h-10 items-center justify-center rounded-md border border-border bg-surface px-4 font-semibold text-ink-secondary hover:bg-canvas"
-          type="button"
-          :disabled="store.busy"
-          @click="reset"
-        >
-          取消
-        </button>
-        <button
           class="inline-flex h-10 items-center justify-center rounded-md border border-primary bg-primary px-4 font-semibold whitespace-nowrap text-on-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           :disabled="store.busy || !name.trim() || !directory.trim()"
           @click="save"
         >
-          {{ editingId ? "保存修改" : "添加 Agent" }}
+          添加 Agent
         </button>
       </div>
-      <p
-        class="col-span-3 m-0 text-xs text-ink-muted max-[760px]:col-span-1"
-      >
-        Skills 目录必须为空目录：其中的链接全部由本插件创建与管理，插件不会修改目录中的其他内容。
+      <p class="col-span-3 m-0 text-xs text-ink-muted max-[760px]:col-span-1">
+        Skills
+        目录必须为空目录：其中的链接全部由本插件创建与管理，插件不会修改目录中的其他内容。
+      </p>
+    </div>
+
+    <div
+      class="mt-4 flex items-start gap-2 rounded-lg border border-primary-border bg-primary-soft px-3.5 py-2.5 text-sm text-primary"
+      role="status"
+    >
+      <Info class="mt-0.5 shrink-0" :size="17" />
+      <p class="m-0 leading-6">
+        Agent
+        创建后不可修改名称与目录，避免迁移链接造成意外。如需调整，请删除后重新创建。
       </p>
     </div>
 
@@ -164,15 +142,6 @@ async function remove(agent) {
           }}</span>
         </div>
         <button
-          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
-          type="button"
-          title="编辑"
-          :disabled="store.busy"
-          @click="edit(agent)"
-        >
-          <Pencil :size="17" :stroke-width="1.8" />
-        </button>
-        <button
           class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-danger hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           title="删除"
@@ -187,7 +156,7 @@ async function remove(agent) {
       v-else
       :icon="Bot"
       title="还没有 Agent"
-      description="填写名称与 Skills 目录，保存后即可配置分组。"
+      description="填写名称与空目录，保存后即可在应用配置中开启 Skills。"
     />
   </section>
 </template>

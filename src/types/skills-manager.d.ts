@@ -66,14 +66,8 @@ export interface SkillsManagerApi {
     allowEmptyRepository?: boolean;
   }): Promise<SkillsManagerState>;
   saveGroups(groups: GroupRecord[]): Promise<SkillsManagerState>;
-  /** 新建 Agent；目录必须为空且未被占用 */
+  /** 新建 Agent；目录必须为空且未被占用，创建后不可修改 */
   createAgent(input: {
-    name: string;
-    directory: string;
-  }): Promise<SkillsManagerState>;
-  /** 更新 Agent（改名或更换目录，更换时新目录必须为空） */
-  updateAgent(input: {
-    id: string;
     name: string;
     directory: string;
   }): Promise<SkillsManagerState>;

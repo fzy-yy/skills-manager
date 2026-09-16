@@ -127,36 +127,11 @@ async function syncAgentLinks({
 
   const skillById = new Map(skills.map((skill) => [skill.id, skill]));
   const desiredIds = new Set(enabledSkillIds);
-
-  // 同名目录冲突：多个已启用 Skill 的目录名相同，链接无法区分，统一跳过。
-  const folderCounts = new Map();
-  for (const skillId of desiredIds) {
-    const skill = skillById.get(skillId);
-    if (!skill) continue;
-    folderCounts.set(
-      skill.folderName,
-      (folderCounts.get(skill.folderName) || 0) + 1,
-    );
-  }
-  const conflictedFolders = new Set(
-    [...folderCounts.entries()]
-      .filter(([, count]) => count > 1)
-      .map(([folderName]) => folderName),
-  );
-  if (conflictedFolders.size)
-    issues.push(
-      createIssue(
-        "error",
-        `多个已启用 Skills 使用同一目录名（${[...conflictedFolders].join("、")}），为避免互相覆盖，这些链接不会被创建。`,
-      ),
-    );
-
-  // 期望链接：目录名 → Skill（跳过冲突项与无效 id）。
+  // 期望链接：目录名 → Skill（Skill id 即目录名，天然唯一；缓存中不存在的无效 id 直接忽略）。
   const desiredByFolder = new Map();
   for (const skillId of desiredIds) {
     const skill = skillById.get(skillId);
-    if (!skill || conflictedFolders.has(skill.folderName)) continue;
-    desiredByFolder.set(skill.folderName, skill);
+    if (skill) desiredByFolder.set(skill.folderName, skill);
   }
 
   let entries;
@@ -192,7 +167,6 @@ async function syncAgentLinks({
       skill &&
       desiredIds.has(skill.id) &&
       entry.name === skill.folderName &&
-      !conflictedFolders.has(skill.folderName) &&
       (await pathExists(skill.sourcePath));
 
     if (shouldKeep) {
@@ -219,6 +193,17 @@ async function syncAgentLinks({
     if (keptPaths.has(comparablePath(linkPath))) continue;
     const inspected = await inspectEntry(linkPath);
     if (inspected.kind === "missing") {
+      // Windows junction / 符号链接允许指向不存在的目标，因此先确认源目录仍存在，
+      // 避免缓存过期时创建出无意义的悬空链接。
+      if (!(await pathExists(skill.sourcePath))) {
+        issues.push(
+          createIssue(
+            "error",
+            `“${skill.name}”无法链接：源目录不存在 ${skill.sourcePath}，请重新扫描仓库后再试。`,
+          ),
+        );
+        continue;
+      }
       try {
         await fs.promises.symlink(
           skill.sourcePath,
