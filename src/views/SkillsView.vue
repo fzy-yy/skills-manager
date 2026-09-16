@@ -59,11 +59,21 @@ async function confirmEmptyRepository() {
   if (!accepted) return;
   await store.refreshSkills({ allowEmptyRepository: true });
 }
+
+/**
+ * 双击 Skills 卡片：在系统文件管理器中打开该 Skill 所在文件夹。
+ * 只读操作，失败信息已由 store 统一提示。
+ *
+ * @param {{id: string}} skill - 被双击的 Skill
+ */
+function openSkillFolder(skill) {
+  store.openSkillFolder(skill.id);
+}
 </script>
 
 <template>
   <section
-    class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
+    class="mx-auto flex h-full w-[calc(100%-3rem)] max-w-260 flex-col overflow-hidden pt-7.5 max-[760px]:w-[calc(100%-2rem)]"
   >
     <PageHeader
       eyebrow="统一来源"
@@ -78,7 +88,8 @@ async function confirmEmptyRepository() {
       </div>
     </PageHeader>
 
-    <div class="rounded-xl border border-border bg-surface p-5 shadow-sm">
+    <!-- 固定区：仓库目录配置卡片 -->
+    <div class="shrink-0 rounded-xl border border-border bg-surface p-5 shadow-sm">
       <label
         class="mb-1.5 block text-xs font-semibold text-ink-secondary"
         for="repository-path"
@@ -122,7 +133,7 @@ async function confirmEmptyRepository() {
 
     <div
       v-if="store.emptyRepository"
-      class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-warning bg-warning-soft px-4 py-3 text-sm text-warning"
+      class="mt-4 flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-warning bg-warning-soft px-4 py-3 text-sm text-warning"
       role="status"
     >
       <CircleAlert class="shrink-0" :size="18" />
@@ -141,24 +152,32 @@ async function confirmEmptyRepository() {
       </button>
     </div>
 
-    <div
-      v-if="store.skills.length"
-      class="mt-5 grid grid-cols-3 gap-2 max-[760px]:grid-cols-2"
-      aria-label="Skills 列表"
-    >
+    <!-- 滚动区：Skills 卡片列表（顶部信息与目录配置保持固定） -->
+    <div class="min-h-0 flex-1 overflow-y-auto pb-12">
+      <p v-if="store.skills.length" class="mt-5 mb-0 text-xs text-ink-muted">
+        双击卡片可在文件管理器中打开该 Skill 所在文件夹。
+      </p>
       <div
-        v-for="skill in store.skills"
-        :key="skill.id"
-        class="truncate rounded-lg border border-border bg-surface px-4 py-3 font-medium"
+        v-if="store.skills.length"
+        class="mt-2 grid grid-cols-3 gap-2 max-[760px]:grid-cols-2"
+        aria-label="Skills 列表"
       >
-        {{ skill.name }}
+        <div
+          v-for="skill in store.skills"
+          :key="skill.id"
+          class="cursor-pointer truncate rounded-lg border border-border bg-surface px-4 py-3 font-medium transition-colors hover:border-primary-border hover:bg-primary-soft hover:text-primary"
+          :title="`双击打开文件夹：${skill.sourcePath}`"
+          @dblclick="openSkillFolder(skill)"
+        >
+          {{ skill.name }}
+        </div>
       </div>
+      <EmptyState
+        v-else
+        :icon="Database"
+        title="还没有检测到 Skills"
+        description="选择仓库目录后，所有有效的 Skill 名称会简洁地列在这里。"
+      />
     </div>
-    <EmptyState
-      v-else
-      :icon="Database"
-      title="还没有检测到 Skills"
-      description="选择仓库目录后，所有有效的 Skill 名称会简洁地列在这里。"
-    />
   </section>
 </template>

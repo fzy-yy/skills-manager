@@ -1,5 +1,5 @@
 <script setup>
-import { Bot, Info, Trash2 } from "@lucide/vue";
+import { Bot, FolderOpen, Info, Trash2 } from "@lucide/vue";
 import { ref } from "vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
@@ -43,6 +43,16 @@ async function save() {
 }
 
 /**
+ * 在系统文件管理器中打开该 Agent 的 Skills 目录。
+ * 只读操作，失败信息已由 store 统一提示。
+ *
+ * @param {{id: string}} agent - 目标 Agent
+ */
+function openFolder(agent) {
+  store.openAgentFolder(agent.id);
+}
+
+/**
  * 删除 Agent：确认后删除配置，并清理本应用在其目录创建的链接。
  *
  * @param {{id: string, name: string}} agent - 被删除的 Agent
@@ -61,7 +71,7 @@ async function remove(agent) {
 
 <template>
   <section
-    class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
+    class="mx-auto flex h-full w-[calc(100%-3rem)] max-w-260 flex-col overflow-hidden pt-7.5 max-[760px]:w-[calc(100%-2rem)]"
   >
     <PageHeader
       eyebrow="目标管理"
@@ -69,8 +79,9 @@ async function remove(agent) {
       description="保存 Agent 名称及其 Skills 目录，供应用配置使用。"
     />
 
+    <!-- 固定区：新增表单与说明 -->
     <div
-      class="grid grid-cols-[190px_minmax(0,1fr)_auto] items-end gap-3 rounded-xl border border-border bg-surface p-5 shadow-sm max-[760px]:grid-cols-1"
+      class="grid shrink-0 grid-cols-[190px_minmax(0,1fr)_auto] items-end gap-3 rounded-xl border border-border bg-surface p-5 shadow-sm max-[760px]:grid-cols-1"
     >
       <div>
         <label
@@ -115,7 +126,7 @@ async function remove(agent) {
     </div>
 
     <div
-      class="mt-4 flex items-start gap-2 rounded-lg border border-primary-border bg-primary-soft px-3.5 py-2.5 text-sm text-primary"
+      class="mt-4 flex shrink-0 items-start gap-2 rounded-lg border border-primary-border bg-primary-soft px-3.5 py-2.5 text-sm text-primary"
       role="status"
     >
       <Info class="mt-0.5 shrink-0" :size="17" />
@@ -125,38 +136,50 @@ async function remove(agent) {
       </p>
     </div>
 
-    <div v-if="store.agents.length" class="mt-4 grid gap-2">
-      <article
-        v-for="agent in store.agents"
-        :key="agent.id"
-        class="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 shadow-sm"
-      >
-        <span
-          class="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
-          ><Bot :size="21" :stroke-width="1.8"
-        /></span>
-        <div class="flex min-w-0 flex-1 flex-col gap-1">
-          <strong class="truncate">{{ agent.name }}</strong
-          ><span class="truncate font-mono text-xs text-ink-muted">{{
-            agent.directory || "当前设备尚未配置目录"
-          }}</span>
-        </div>
-        <button
-          class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-danger hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
-          type="button"
-          title="删除"
-          :disabled="store.busy"
-          @click="remove(agent)"
+    <!-- 滚动区：Agent 卡片列表 -->
+    <div class="min-h-0 flex-1 overflow-y-auto pb-12">
+      <div v-if="store.agents.length" class="mt-4 grid gap-2">
+        <article
+          v-for="agent in store.agents"
+          :key="agent.id"
+          class="flex min-w-0 items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 shadow-sm"
         >
-          <Trash2 :size="17" :stroke-width="1.8" />
-        </button>
-      </article>
+          <span
+            class="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
+            ><Bot :size="21" :stroke-width="1.8"
+          /></span>
+          <div class="flex min-w-0 flex-1 flex-col gap-1">
+            <strong class="truncate">{{ agent.name }}</strong
+            ><span class="truncate font-mono text-xs text-ink-muted">{{
+              agent.directory || "当前设备尚未配置目录"
+            }}</span>
+          </div>
+          <button
+            class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            title="在文件管理器中打开该目录"
+            :disabled="store.busy"
+            @click="openFolder(agent)"
+          >
+            <FolderOpen :size="17" :stroke-width="1.8" />
+          </button>
+          <button
+            class="grid size-9 shrink-0 place-items-center rounded-md border border-transparent bg-transparent text-ink-secondary hover:border-danger hover:bg-danger-soft hover:text-danger disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            title="删除"
+            :disabled="store.busy"
+            @click="remove(agent)"
+          >
+            <Trash2 :size="17" :stroke-width="1.8" />
+          </button>
+        </article>
+      </div>
+      <EmptyState
+        v-else
+        :icon="Bot"
+        title="还没有 Agent"
+        description="填写名称与空目录，保存后即可在应用配置中开启 Skills。"
+      />
     </div>
-    <EmptyState
-      v-else
-      :icon="Bot"
-      title="还没有 Agent"
-      description="填写名称与空目录，保存后即可在应用配置中开启 Skills。"
-    />
   </section>
 </template>

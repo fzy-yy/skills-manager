@@ -68,7 +68,9 @@ onMounted(() => {
       </nav>
     </header>
 
-    <main class="min-h-0 flex-1 overflow-auto">
+    <!-- 页面统一改为「顶部固定 + 内容区独立滚动」：外层禁止整页滚动，
+         各视图根元素为 h-full 并自行管理内部滚动区域 -->
+    <main class="min-h-0 flex-1 overflow-hidden">
       <RouterView v-if="store.ready" />
       <div
         v-else

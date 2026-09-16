@@ -58,6 +58,10 @@ export interface SkillsManagerApi {
   chooseDirectory(defaultPath?: string): string;
   /** 只读取本地配置与扫描缓存，不触发扫描或链接同步 */
   getState(): Promise<SkillsManagerState>;
+  /** 在系统文件管理器中打开某个 Skill 所在文件夹（Skills 卡片双击） */
+  openSkillFolder(skillId: string): Promise<void>;
+  /** 在系统文件管理器中打开某个 Agent 的 Skills 目录（Agents 卡片按钮） */
+  openAgentFolder(agentId: string): Promise<void>;
   setTheme(theme: string): Promise<SkillsManagerState>;
   /** 设置仓库目录并扫描、同步所有 Agent 链接 */
   setRepository(repositoryPath: string): Promise<SkillsManagerState>;

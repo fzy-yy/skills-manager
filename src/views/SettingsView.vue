@@ -42,7 +42,7 @@ async function clearData() {
 
 <template>
   <section
-    class="mx-auto flex min-h-full w-[calc(100%-3rem)] max-w-260 flex-col py-7.5 pb-12 max-[760px]:w-[calc(100%-2rem)]"
+    class="mx-auto flex h-full w-[calc(100%-3rem)] max-w-260 flex-col overflow-hidden pt-7.5 max-[760px]:w-[calc(100%-2rem)]"
   >
     <PageHeader
       eyebrow="个性设置"
@@ -50,64 +50,67 @@ async function clearData() {
       description="调整界面显示偏好并管理本地数据。"
     />
 
-    <div
-      class="flex items-center gap-4 rounded-xl border border-border bg-surface p-4 shadow-sm max-[560px]:flex-col max-[560px]:items-stretch"
-    >
-      <div class="flex min-w-0 flex-1 items-center gap-3">
-        <span
-          class="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
-          ><Palette :size="20" :stroke-width="1.8"
-        /></span>
-        <div>
-          <h2 class="m-0 text-base font-semibold text-ink">外观主题</h2>
-          <p class="mt-1 mb-0 text-xs text-ink-muted">
-            选择适合当前使用环境的显示模式。
-          </p>
+    <!-- 滚动区：设置卡片（窗口较矮时可滚动查看） -->
+    <div class="min-h-0 flex-1 overflow-y-auto pb-12">
+      <div
+        class="flex items-center gap-4 rounded-xl border border-border bg-surface p-4 shadow-sm max-[560px]:flex-col max-[560px]:items-stretch"
+      >
+        <div class="flex min-w-0 flex-1 items-center gap-3">
+          <span
+            class="grid size-10 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
+            ><Palette :size="20" :stroke-width="1.8"
+          /></span>
+          <div>
+            <h2 class="m-0 text-base font-semibold text-ink">外观主题</h2>
+            <p class="mt-1 mb-0 text-xs text-ink-muted">
+              选择适合当前使用环境的显示模式。
+            </p>
+          </div>
+        </div>
+        <div class="flex shrink-0 rounded-lg border border-border bg-canvas p-1">
+          <button
+            v-for="option in themeOptions"
+            :key="option.value"
+            type="button"
+            class="inline-flex h-9 items-center justify-center gap-2 rounded-md border-0 px-3 font-semibold disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="store.busy"
+            :class="
+              store.theme === option.value
+                ? 'bg-surface text-primary shadow-sm'
+                : 'bg-transparent text-ink-muted hover:text-ink'
+            "
+            :aria-pressed="store.theme === option.value"
+            @click="selectTheme(option.value)"
+          >
+            <component :is="option.icon" :size="16" :stroke-width="1.8" />{{
+              option.label
+            }}
+          </button>
         </div>
       </div>
-      <div class="flex shrink-0 rounded-lg border border-border bg-canvas p-1">
-        <button
-          v-for="option in themeOptions"
-          :key="option.value"
-          type="button"
-          class="inline-flex h-9 items-center justify-center gap-2 rounded-md border-0 px-3 font-semibold disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="store.busy"
-          :class="
-            store.theme === option.value
-              ? 'bg-surface text-primary shadow-sm'
-              : 'bg-transparent text-ink-muted hover:text-ink'
-          "
-          :aria-pressed="store.theme === option.value"
-          @click="selectTheme(option.value)"
-        >
-          <component :is="option.icon" :size="16" :stroke-width="1.8" />{{
-            option.label
-          }}
-        </button>
-      </div>
-    </div>
 
-    <div class="mt-4 rounded-xl border border-border bg-surface p-5 shadow-sm">
-      <div class="flex items-center gap-4">
-        <span
-          class="grid size-10 shrink-0 place-items-center rounded-lg bg-danger-soft text-danger"
-          ><Database :size="20" :stroke-width="1.8"
-        /></span>
-        <div class="min-w-0 flex-1">
-          <h2 class="m-0 text-base font-semibold text-ink">数据管理</h2>
-          <p class="mt-1 mb-0 text-xs leading-5 text-ink-muted">
-            清除当前设备上 uTools 数据目录中的插件配置，并移除本应用创建的 Agent
-            Skills 链接；数据不会在设备间同步。
-          </p>
+      <div class="mt-4 rounded-xl border border-border bg-surface p-5 shadow-sm">
+        <div class="flex items-center gap-4">
+          <span
+            class="grid size-10 shrink-0 place-items-center rounded-lg bg-danger-soft text-danger"
+            ><Database :size="20" :stroke-width="1.8"
+          /></span>
+          <div class="min-w-0 flex-1">
+            <h2 class="m-0 text-base font-semibold text-ink">数据管理</h2>
+            <p class="mt-1 mb-0 text-xs leading-5 text-ink-muted">
+              清除当前设备上 uTools 数据目录中的插件配置，并移除本应用创建的 Agent
+              Skills 链接；数据不会在设备间同步。
+            </p>
+          </div>
+          <button
+            class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md border border-danger bg-danger-soft px-4 font-semibold text-danger hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+            type="button"
+            :disabled="store.busy"
+            @click="clearData"
+          >
+            <Trash2 :size="17" :stroke-width="1.8" />清除数据
+          </button>
         </div>
-        <button
-          class="inline-flex h-10 shrink-0 items-center justify-center gap-2 rounded-md border border-danger bg-danger-soft px-4 font-semibold text-danger hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
-          type="button"
-          :disabled="store.busy"
-          @click="clearData"
-        >
-          <Trash2 :size="17" :stroke-width="1.8" />清除数据
-        </button>
       </div>
     </div>
   </section>

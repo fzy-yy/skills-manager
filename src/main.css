@@ -154,6 +154,15 @@
   --font-sans: Inter, "Segoe UI", "PingFang SC", "Microsoft YaHei", sans-serif;
 }
 
+/* ===== 五、滚动条样式（完全隐藏） ===== */
+/* 按需求隐藏滚动条：视觉上不显示滑块与轨道，滚动能力保持不变。
+   实现方式：uTools 运行在 Chromium 中，::-webkit-scrollbar 的 display:none
+   即可让滚动条消失；不要改用 overflow:hidden，那会同时禁用滚动。
+   注意：隐藏后无法通过滚动条判断内容长度，长列表只能靠滚轮 / 触控板滚动。 */
+::-webkit-scrollbar {
+  display: none;
+}
+
 /* 文件末尾约定：本文件必须保持为标准 CSS 写法，禁止引入 SCSS / Less 等预处理器语法，
    因为 @tailwindcss/vite 会直接解析 @theme 与 @custom-variant，
    多一层预处理器会破坏解析过程（构建不报错但主题变量全部失效）。 */

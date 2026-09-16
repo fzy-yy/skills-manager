@@ -103,8 +103,26 @@ function normalizeAgent(item) {
 }
 
 /**
+ * 生成不重名的实体名称（分组 / Agent 共用）：名称已被占用时在末尾追加递增序号，
+ * 例如“前端开发 (2)”“Codex (2)”。
+ *
+ * @param {string} base - 期望的名称
+ * @param {Set<string>} usedNames - 已被占用的名称集合
+ * @returns {string} 保证唯一的名称（必要时截断基础名称以避免超长）
+ */
+function uniqueEntityName(base, usedNames) {
+  if (!usedNames.has(base)) return base;
+  for (let index = 2; ; index += 1) {
+    const suffix = ` (${index})`;
+    const candidate = `${base.slice(0, Math.max(MAX_ENTITY_NAME_LENGTH - suffix.length, 1))}${suffix}`;
+    if (!usedNames.has(candidate)) return candidate;
+  }
+}
+
+/**
  * 把磁盘上的任意 JSON 规范化为可信配置对象。
- * 无效的分组 / Agent / 缓存项会被丢弃，enabledSkills 只保留现存 Agent 的条目。
+ * 无效的分组 / Agent / 缓存项会被丢弃，enabledSkills 只保留现存 Agent 的条目；
+ * 重名的分组会被自动追加递增序号（历史数据也可能因此被改名）。
  *
  * @param {object} raw - 解析后的原始数据
  * @returns {{state: object, issues: Array}} 规范化配置与需要提示的问题
@@ -114,21 +132,37 @@ function normalizeState(raw) {
   const source = isPlainObject(raw) ? raw : {};
 
   const groupIds = new Set();
+  const groupNames = new Set();
+  let renamedGroupCount = 0;
   const groups = (Array.isArray(source.groups) ? source.groups : [])
     .map(normalizeGroup)
     .filter((group) => {
       if (!group || groupIds.has(group.id)) return false;
       groupIds.add(group.id);
       return true;
+    })
+    .map((group) => {
+      const name = uniqueEntityName(group.name, groupNames);
+      if (name !== group.name) renamedGroupCount += 1;
+      groupNames.add(name);
+      return { id: group.id, name, skillIds: group.skillIds };
     });
 
   const agentIds = new Set();
+  const agentNames = new Set();
+  let renamedAgentCount = 0;
   const agents = (Array.isArray(source.agents) ? source.agents : [])
     .map(normalizeAgent)
     .filter((agent) => {
       if (!agent || agentIds.has(agent.id)) return false;
       agentIds.add(agent.id);
       return true;
+    })
+    .map((agent) => {
+      const name = uniqueEntityName(agent.name, agentNames);
+      if (name !== agent.name) renamedAgentCount += 1;
+      agentNames.add(name);
+      return { id: agent.id, name, directory: agent.directory };
     });
 
   const skillIds = new Set();
@@ -175,6 +209,20 @@ function normalizeState(raw) {
   const rawAgentCount = Array.isArray(source.agents) ? source.agents.length : 0;
   if (groups.length < rawGroupCount)
     issues.push(createIssue("warning", "本地配置中有无效或重复的分组记录，已忽略。"));
+  if (renamedGroupCount)
+    issues.push(
+      createIssue(
+        "warning",
+        `有 ${renamedGroupCount} 个分组名称重复，已自动添加序号区分。`,
+      ),
+    );
+  if (renamedAgentCount)
+    issues.push(
+      createIssue(
+        "warning",
+        `有 ${renamedAgentCount} 个 Agent 名称重复，已自动添加序号区分。`,
+      ),
+    );
   if (agents.length < rawAgentCount)
     issues.push(createIssue("warning", "本地配置中有无效或重复的 Agent 记录，已忽略。"));
   return { state, issues };
@@ -293,4 +341,5 @@ module.exports = {
   createConfigStore,
   createDefaultState,
   isPlainObject,
+  uniqueEntityName,
 };

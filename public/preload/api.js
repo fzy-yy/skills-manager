@@ -12,6 +12,7 @@ const {
   MAX_ENTITY_NAME_LENGTH,
   createConfigStore,
   createDefaultState,
+  uniqueEntityName,
 } = require("./config");
 const { removeManagedLinks, syncAgentLinks } = require("./links");
 const { scanRepository } = require("./scanner");
@@ -252,6 +253,42 @@ function createSkillsManagerApi({ utools }) {
     return buildState(state, { skills: state.cachedSkills, issues });
   }
 
+  /**
+   * 在系统文件管理器中打开某个 Skill 所在文件夹（Skills 卡片双击时调用）。
+   *
+   * @param {string} skillId - Skill id（目录名）
+   * @throws {Error} Skill 不在扫描缓存中或打开失败时抛出
+   */
+  async function openSkillFolder(skillId) {
+    const { state } = await readState();
+    const skill = state.cachedSkills.find((item) => item.id === skillId);
+    if (!skill) throw new Error("未找到该 Skill，请重新扫描仓库后再试");
+    try {
+      utools.shellOpenPath(skill.sourcePath);
+    } catch (error) {
+      throw new Error(`打开文件夹失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
+   * 在系统文件管理器中打开某个 Agent 的 Skills 目录（Agents 卡片按钮）。
+   *
+   * @param {string} agentId - Agent id
+   * @throws {Error} Agent 不存在、目录已被移动或打开失败时抛出
+   */
+  async function openAgentFolder(agentId) {
+    const { state } = await readState();
+    const agent = state.agents.find((item) => item.id === agentId);
+    if (!agent) throw new Error("未找到该 Agent，请刷新后重试");
+    if (!fs.existsSync(agent.directory))
+      throw new Error(`Agent 目录不存在或已被移动：${agent.directory}`);
+    try {
+      utools.shellOpenPath(agent.directory);
+    } catch (error) {
+      throw new Error(`打开文件夹失败：${errorMessage(error)}`);
+    }
+  }
+
   /** 保存主题设置。 */
   async function setTheme(theme) {
     const { state, issues } = await readState();
@@ -307,11 +344,13 @@ function createSkillsManagerApi({ utools }) {
     });
   }
 
-  /** 保存分组列表（分组只是选择模板，不影响任何链接）。 */
+  /** 保存分组列表（分组只是选择模板，不影响任何链接）。重名分组会自动追加递增序号。 */
   async function saveGroups(groups) {
     const { state, issues } = await readState();
     if (!Array.isArray(groups)) throw new Error("分组数据格式无效");
     const validIds = new Set(state.cachedSkills.map((skill) => skill.id));
+    const usedNames = new Set();
+    let renamedCount = 0;
     const normalized = groups.map((group) => {
       const id = String(group?.id || "").trim();
       const name = String(group?.name || "").trim();
@@ -321,9 +360,13 @@ function createSkillsManagerApi({ utools }) {
         throw new Error(`分组名称不能超过 ${MAX_ENTITY_NAME_LENGTH} 个字符`);
       if (!Array.isArray(group.skillIds))
         throw new Error(`分组“${name}”的 Skills 配置格式无效`);
+      // 名称重复时自动追加递增序号（如“前端开发 (2)”），保证分组名称唯一。
+      const finalName = uniqueEntityName(name, usedNames);
+      if (finalName !== name) renamedCount += 1;
+      usedNames.add(finalName);
       return {
         id,
-        name,
+        name: finalName,
         // 只保留当前扫描结果中仍存在的 Skill，避免保存失效引用。
         skillIds: [
           ...new Set(group.skillIds.map(String).filter(Boolean)),
@@ -332,6 +375,13 @@ function createSkillsManagerApi({ utools }) {
     });
     if (new Set(normalized.map((group) => group.id)).size !== normalized.length)
       throw new Error("分组标识重复，请重新创建分组");
+    if (renamedCount)
+      issues.push(
+        createIssue(
+          "info",
+          `有 ${renamedCount} 个分组名称重复，已自动添加序号区分。`,
+        ),
+      );
     state.groups = normalized;
     await config.write(state);
     return buildState(state, { issues });
@@ -339,8 +389,8 @@ function createSkillsManagerApi({ utools }) {
 
   /**
    * 新建 Agent：名称非空、目录为空、目录未被占用且与仓库不重叠。
-   * 保存后 Agent 信息不可修改（避免目录迁移带来的链接清理风险），
-   * 如需调整请删除后重新创建。
+   * 名称重复时自动追加递增序号；创建后 Agent 信息不可修改（避免目录迁移带来的
+   * 链接清理风险），如需调整请删除后重新创建。
    */
   async function createAgent(input) {
     const { state, issues } = await readState();
@@ -355,8 +405,19 @@ function createSkillsManagerApi({ utools }) {
     assertAgentDirectoryAvailable(state, directory);
     await assertDirectoryEmpty(directory);
 
+    // 名称重复时自动追加递增序号（如“Codex (2)”），保证 Agent 名称唯一。
+    const usedNames = new Set(state.agents.map((agent) => agent.name));
+    const finalName = uniqueEntityName(name, usedNames);
+    if (finalName !== name)
+      issues.push(
+        createIssue(
+          "info",
+          `Agent 名称“${name}”已存在，已自动重命名为“${finalName}”。`,
+        ),
+      );
+
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    state.agents.push({ id, name, directory });
+    state.agents.push({ id, name: finalName, directory });
     state.enabledSkills[id] = [];
     await config.write(state);
     return buildState(state, { issues });
@@ -443,6 +504,8 @@ function createSkillsManagerApi({ utools }) {
     createAgent,
     deleteAgent,
     getState,
+    openAgentFolder,
+    openSkillFolder,
     refresh,
     saveGroups,
     setAgentSkills,

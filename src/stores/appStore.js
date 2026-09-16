@@ -222,6 +222,33 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /**
+   * 在系统文件管理器中打开某个 Skill 所在文件夹（对应 Skills 卡片双击）。
+   * 只读操作，不经过 busy 互斥，避免短时间连续双击被拦截。
+   *
+   * @param {string} skillId - Skill id
+   */
+  async function openSkillFolder(skillId) {
+    try {
+      await backend().openSkillFolder(skillId);
+    } catch (error) {
+      notify(error?.message || "打开文件夹失败", "error");
+    }
+  }
+
+  /**
+   * 在系统文件管理器中打开某个 Agent 的 Skills 目录（对应 Agents 卡片按钮）。
+   *
+   * @param {string} agentId - Agent id
+   */
+  async function openAgentFolder(agentId) {
+    try {
+      await backend().openAgentFolder(agentId);
+    } catch (error) {
+      notify(error?.message || "打开文件夹失败", "error");
+    }
+  }
+
+  /**
    * 更新一个 Agent 的启用 Skills（乐观更新 + 防抖提交）。
    *
    * @param {string} agentId - Agent id
@@ -272,6 +299,8 @@ export const useAppStore = defineStore("app", () => {
     saveGroups,
     createAgent,
     deleteAgent,
+    openSkillFolder,
+    openAgentFolder,
     setAgentSkills,
     clearData,
     flushPendingSkills,
