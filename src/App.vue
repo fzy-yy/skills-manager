@@ -1,7 +1,5 @@
 <script setup>
 // ============ 一、依赖导入 ============
-// lucide 图标：五个导航图标（顶部 tab 使用）。
-import { Bot, Database, Layers3, Link2, Settings2 } from "@lucide/vue";
 // onMounted：组件挂载完成后执行初始化与 uTools 事件注册。
 import { onMounted } from "vue";
 // RouterLink 用于导航高亮，RouterView 用于渲染页面，useRouter 用于代码式跳转。
@@ -9,6 +7,8 @@ import { RouterLink, RouterView, useRouter } from "vue-router";
 // 全局反馈组件与状态仓库。
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import NoticeStack from "./components/NoticeStack.vue";
+// 顶部导航项（含 path / label / icon），与路由定义同源派生。
+import { navigationTabs } from "./router";
 import { useAppStore } from "./stores/appStore";
 
 // ============ 二、全局状态与路由实例 ============
@@ -16,18 +16,7 @@ import { useAppStore } from "./stores/appStore";
 const store = useAppStore();
 const router = useRouter();
 
-// ============ 三、顶部导航配置 ============
-// 约束：tab.path 必须与 src/router/index.js 中注册的 path 完全一致，
-// 否则 RouterLink 匹配不到路由，会出现“点击无反应且当前页不高亮”的问题。
-const tabs = [
-  { path: "/skills", label: "Skills 仓库", icon: Database },
-  { path: "/groups", label: "分组管理", icon: Layers3 },
-  { path: "/applications", label: "应用配置", icon: Link2 },
-  { path: "/agents", label: "Agents", icon: Bot },
-  { path: "/settings", label: "设置", icon: Settings2 },
-];
-
-// ============ 四、初始化与 uTools 事件绑定 ============
+// ============ 三、初始化与 uTools 事件绑定 ============
 onMounted(() => {
   // 读取 uTools userData 下的本地配置，初始化仓库路径、分组、Agent 与主题。
   // initialize 内部已捕获异常并统一提示，这里无需再包 try/catch（避免同一错误提示两次）。
@@ -56,7 +45,7 @@ onMounted(() => {
     >
       <nav class="flex h-full items-stretch justify-center gap-1" aria-label="主导航">
         <RouterLink
-          v-for="tab in tabs"
+          v-for="tab in navigationTabs"
           :key="tab.path"
           :to="tab.path"
           class="relative flex min-w-27 items-center justify-center gap-2 px-3 font-bold text-ink-secondary hover:bg-canvas hover:text-ink max-[760px]:min-w-0 max-[760px]:px-2"

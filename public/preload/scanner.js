@@ -22,6 +22,8 @@ const {
 const MAX_SCAN_ISSUES = 20;
 /** SKILL.md 体积上限：元数据文件不应超过该大小。 */
 const MAX_SKILL_FILE_BYTES = 2 * 1024 * 1024;
+/** 体积上限的 MB 展示值（由字节数派生，保证文案与常量始终一致）。 */
+const MAX_SKILL_FILE_MB = MAX_SKILL_FILE_BYTES / (1024 * 1024);
 
 /**
  * 读取并解析 SKILL.md 的 YAML 元数据中的 name 字段（不引入 YAML 依赖）。
@@ -38,7 +40,10 @@ async function readSkillName(skillFile) {
       `检查 Skill 文件 ${skillFile}`,
     );
     if (stat.size > MAX_SKILL_FILE_BYTES)
-      return { name: "", error: `${skillFile} 超过 2 MB，已拒绝读取` };
+      return {
+        name: "",
+        error: `${skillFile} 超过 ${MAX_SKILL_FILE_MB} MB，已拒绝读取`,
+      };
     content = await withTimeout(
       fs.promises.readFile(skillFile, "utf8"),
       `读取 Skill 文件 ${skillFile}`,
@@ -85,7 +90,7 @@ async function readSkillName(skillFile) {
  * Skill 的 id 与链接目录名均取子目录名（同一层内天然唯一）。
  *
  * @param {string} repositoryPath - 仓库根目录（来自配置，视为可信路径）
- * @returns {Promise<{skills: Array<{id: string, name: string, folderName: string, sourcePath: string}>, issues: Array, complete: boolean}>}
+ * @returns {Promise<{skills: Array<{id: string, name: string, sourcePath: string}>, issues: Array, complete: boolean}>}
  *          complete 为 false 表示扫描不完整，调用方不应执行链接清理
  */
 async function scanRepository(repositoryPath) {
@@ -168,7 +173,6 @@ async function scanRepository(repositoryPath) {
       skills.push({
         id: entry.name,
         name: result.name,
-        folderName: entry.name,
         sourcePath: directory,
       });
       continue;

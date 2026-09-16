@@ -94,7 +94,7 @@ async function isManagedLink(inspected, repositoryPath) {
  *
  * @param {object} options - 同步参数
  * @param {string} options.repositoryPath - 统一 Skills 仓库目录
- * @param {Array<{id: string, name: string, folderName: string, sourcePath: string}>} options.skills - 最近一次完整扫描结果
+ * @param {Array<{id: string, name: string, sourcePath: string}>} options.skills - 最近一次完整扫描结果
  * @param {{id: string, name: string, directory: string}} options.agent - 目标 Agent
  * @param {string[]} options.enabledSkillIds - 该 Agent 已启用的 Skill id 列表
  * @returns {Promise<{issues: Array}>} 本次同步产生的问题（错误与提示）
@@ -125,14 +125,9 @@ async function syncAgentLinks({
     };
   }
 
-  const skillById = new Map(skills.map((skill) => [skill.id, skill]));
   const desiredIds = new Set(enabledSkillIds);
-  // 期望链接：目录名 → Skill（Skill id 即目录名，天然唯一；缓存中不存在的无效 id 直接忽略）。
-  const desiredByFolder = new Map();
-  for (const skillId of desiredIds) {
-    const skill = skillById.get(skillId);
-    if (skill) desiredByFolder.set(skill.folderName, skill);
-  }
+  // 期望链接：Skill id 即链接目录名（同一仓库内天然唯一；缓存中不存在的无效 id 直接忽略）。
+  const desiredSkills = skills.filter((skill) => desiredIds.has(skill.id));
 
   let entries;
   try {
@@ -166,7 +161,7 @@ async function syncAgentLinks({
     const shouldKeep =
       skill &&
       desiredIds.has(skill.id) &&
-      entry.name === skill.folderName &&
+      entry.name === skill.id &&
       (await pathExists(skill.sourcePath));
 
     if (shouldKeep) {
@@ -188,8 +183,8 @@ async function syncAgentLinks({
   }
 
   // 第二轮：为缺失的期望链接创建符号链接。
-  for (const skill of desiredByFolder.values()) {
-    const linkPath = path.join(directory, skill.folderName);
+  for (const skill of desiredSkills) {
+    const linkPath = path.join(directory, skill.id);
     if (keptPaths.has(comparablePath(linkPath))) continue;
     const inspected = await inspectEntry(linkPath);
     if (inspected.kind === "missing") {

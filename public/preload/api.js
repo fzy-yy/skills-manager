@@ -19,9 +19,9 @@ const { scanRepository } = require("./scanner");
 const {
   createIssue,
   errorMessage,
-  isInsideDirectoryLexical,
   normalizeDirectory,
   pathsEqualLexical,
+  pathsOverlapLexical,
   uniqueIssues,
 } = require("./utils");
 
@@ -69,7 +69,7 @@ function createSkillsManagerApi({ utools }) {
   function buildState(state, { skills, issues = [], agentIssues, emptyRepository } = {}) {
     const result = {
       repositoryPath: state.repositoryPath,
-      skills: skills || state.cachedSkills || [],
+      skills: skills || state.cachedSkills,
       groups: state.groups,
       agents: state.agents.map((agent) => ({
         id: agent.id,
@@ -202,11 +202,7 @@ function createSkillsManagerApi({ utools }) {
       if (pathsEqualLexical(agent.directory, directory))
         throw new Error(`该目录已由 Agent“${agent.name}”使用，请选择其他目录`);
     }
-    if (
-      state.repositoryPath &&
-      (isInsideDirectoryLexical(state.repositoryPath, directory) ||
-        isInsideDirectoryLexical(directory, state.repositoryPath))
-    )
+    if (state.repositoryPath && pathsOverlapLexical(state.repositoryPath, directory))
       throw new Error(
         "Agent Skills 目录不能与统一 Skills 仓库相同或互相包含，以免扫描和链接相互影响",
       );
@@ -254,6 +250,20 @@ function createSkillsManagerApi({ utools }) {
   }
 
   /**
+   * 在系统文件管理器中打开一个目录。
+   *
+   * @param {string} directory - 待打开的目录
+   * @throws {Error} 打开失败时抛出
+   */
+  function shellOpenDirectory(directory) {
+    try {
+      utools.shellOpenPath(directory);
+    } catch (error) {
+      throw new Error(`打开文件夹失败：${errorMessage(error)}`);
+    }
+  }
+
+  /**
    * 在系统文件管理器中打开某个 Skill 所在文件夹（Skills 卡片双击时调用）。
    *
    * @param {string} skillId - Skill id（目录名）
@@ -263,11 +273,7 @@ function createSkillsManagerApi({ utools }) {
     const { state } = await readState();
     const skill = state.cachedSkills.find((item) => item.id === skillId);
     if (!skill) throw new Error("未找到该 Skill，请重新扫描仓库后再试");
-    try {
-      utools.shellOpenPath(skill.sourcePath);
-    } catch (error) {
-      throw new Error(`打开文件夹失败：${errorMessage(error)}`);
-    }
+    shellOpenDirectory(skill.sourcePath);
   }
 
   /**
@@ -282,11 +288,7 @@ function createSkillsManagerApi({ utools }) {
     if (!agent) throw new Error("未找到该 Agent，请刷新后重试");
     if (!fs.existsSync(agent.directory))
       throw new Error(`Agent 目录不存在或已被移动：${agent.directory}`);
-    try {
-      utools.shellOpenPath(agent.directory);
-    } catch (error) {
-      throw new Error(`打开文件夹失败：${errorMessage(error)}`);
-    }
+    shellOpenDirectory(agent.directory);
   }
 
   /** 保存主题设置。 */
@@ -307,10 +309,7 @@ function createSkillsManagerApi({ utools }) {
     const { state, issues } = await readState();
     const normalized = await normalizeDirectory(repositoryPath, "Skills 仓库目录");
     for (const agent of state.agents) {
-      if (
-        isInsideDirectoryLexical(normalized, agent.directory) ||
-        isInsideDirectoryLexical(agent.directory, normalized)
-      )
+      if (pathsOverlapLexical(normalized, agent.directory))
         throw new Error(
           `Skills 仓库不能与 Agent“${agent.name}”的目录相同或互相包含，请调整其中一个路径`,
         );
@@ -513,20 +512,17 @@ function createSkillsManagerApi({ utools }) {
     setTheme,
   };
 
-  // 改动配置或文件系统的方法统一串行，读方法（getState）与目录选择不需要排队。
-  const serializedMethods = [
-    "clearData",
-    "createAgent",
-    "deleteAgent",
-    "refresh",
-    "saveGroups",
-    "setAgentSkills",
-    "setRepository",
-    "setTheme",
-  ];
-  for (const method of serializedMethods) {
-    const operation = api[method].bind(api);
-    api[method] = (...args) => serialize(() => operation(...args));
+  // 串行化策略：只读 / 同步方法直接暴露，其余（会改动配置或文件系统的方法）统一包一层
+  // 队列。采用“白名单直通 + 其余自动串行”，新增写方法时不会漏包队列。
+  const directMethods = new Set([
+    "chooseDirectory", // 同步方法，返回字符串而不是 Promise，不能包成异步
+    "getState",
+    "openAgentFolder",
+    "openSkillFolder",
+  ]);
+  for (const [name, method] of Object.entries(api)) {
+    if (directMethods.has(name)) continue;
+    api[name] = (...args) => serialize(() => method(...args));
   }
   return api;
 }

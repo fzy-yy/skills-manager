@@ -40,29 +40,28 @@ function isPlainObject(value) {
 
 /**
  * 规范化一个 Skill 缓存项；字段缺失或格式错误时返回 null。
+ * id 必须是单层目录名（同时是 Agent 目录中的链接名）；历史版本曾把 id
+ * 存为相对路径，这类记录无法与目录名安全对应，按无效丢弃（重新扫描即可恢复）。
  *
  * @param {object} item - 磁盘上的缓存项
- * @returns {{id: string, name: string, folderName: string, sourcePath: string}|null}
+ * @returns {{id: string, name: string, sourcePath: string}|null}
  */
 function normalizeSkill(item) {
   if (!isPlainObject(item)) return null;
   const id = typeof item.id === "string" ? item.id.trim() : "";
   const name = typeof item.name === "string" ? item.name.trim() : "";
-  const folderName =
-    typeof item.folderName === "string" ? item.folderName.trim() : "";
   const sourcePath =
     typeof item.sourcePath === "string" ? item.sourcePath.trim() : "";
   if (
     !id ||
     !name ||
-    !folderName ||
     !sourcePath ||
-    folderName !== path.basename(folderName) ||
-    folderName === "." ||
-    folderName === ".."
+    id !== path.basename(id) ||
+    id === "." ||
+    id === ".."
   )
     return null;
-  return { id, name, folderName, sourcePath };
+  return { id, name, sourcePath };
 }
 
 /**
@@ -120,9 +119,37 @@ function uniqueEntityName(base, usedNames) {
 }
 
 /**
+ * 规范化一组实体（分组 / Agent 共用）：丢弃无效项与重复 id，并对重名实体
+ * 自动追加递增序号（历史数据也可能因此被改名）。
+ *
+ * @param {Array} list - 磁盘上的原始数组
+ * @param {(item: object) => object|null} normalizeItem - 单项规范化函数
+ * @returns {{items: Array, rawCount: number, renamedCount: number}} 规范化结果与统计
+ */
+function normalizeEntityList(list, normalizeItem) {
+  const ids = new Set();
+  const names = new Set();
+  let renamedCount = 0;
+  const items = (Array.isArray(list) ? list : [])
+    .map(normalizeItem)
+    .filter((item) => {
+      if (!item || ids.has(item.id)) return false;
+      ids.add(item.id);
+      return true;
+    })
+    .map((item) => {
+      const name = uniqueEntityName(item.name, names);
+      if (name !== item.name) renamedCount += 1;
+      names.add(name);
+      return { ...item, name };
+    });
+  return { items, rawCount: Array.isArray(list) ? list.length : 0, renamedCount };
+}
+
+/**
  * 把磁盘上的任意 JSON 规范化为可信配置对象。
  * 无效的分组 / Agent / 缓存项会被丢弃，enabledSkills 只保留现存 Agent 的条目；
- * 重名的分组会被自动追加递增序号（历史数据也可能因此被改名）。
+ * 重名的分组与 Agent 会被自动追加递增序号（历史数据也可能因此被改名）。
  *
  * @param {object} raw - 解析后的原始数据
  * @returns {{state: object, issues: Array}} 规范化配置与需要提示的问题
@@ -131,39 +158,8 @@ function normalizeState(raw) {
   const issues = [];
   const source = isPlainObject(raw) ? raw : {};
 
-  const groupIds = new Set();
-  const groupNames = new Set();
-  let renamedGroupCount = 0;
-  const groups = (Array.isArray(source.groups) ? source.groups : [])
-    .map(normalizeGroup)
-    .filter((group) => {
-      if (!group || groupIds.has(group.id)) return false;
-      groupIds.add(group.id);
-      return true;
-    })
-    .map((group) => {
-      const name = uniqueEntityName(group.name, groupNames);
-      if (name !== group.name) renamedGroupCount += 1;
-      groupNames.add(name);
-      return { id: group.id, name, skillIds: group.skillIds };
-    });
-
-  const agentIds = new Set();
-  const agentNames = new Set();
-  let renamedAgentCount = 0;
-  const agents = (Array.isArray(source.agents) ? source.agents : [])
-    .map(normalizeAgent)
-    .filter((agent) => {
-      if (!agent || agentIds.has(agent.id)) return false;
-      agentIds.add(agent.id);
-      return true;
-    })
-    .map((agent) => {
-      const name = uniqueEntityName(agent.name, agentNames);
-      if (name !== agent.name) renamedAgentCount += 1;
-      agentNames.add(name);
-      return { id: agent.id, name, directory: agent.directory };
-    });
+  const groups = normalizeEntityList(source.groups, normalizeGroup);
+  const agents = normalizeEntityList(source.agents, normalizeAgent);
 
   const skillIds = new Set();
   const cachedSkills = (
@@ -180,7 +176,7 @@ function normalizeState(raw) {
   const rawEnabled = isPlainObject(source.enabledSkills)
     ? source.enabledSkills
     : {};
-  for (const agent of agents) {
+  for (const agent of agents.items) {
     const values = rawEnabled[agent.id];
     enabledSkills[agent.id] = Array.isArray(values)
       ? [
@@ -198,33 +194,31 @@ function normalizeState(raw) {
       typeof source.repositoryPath === "string"
         ? source.repositoryPath.trim()
         : "",
-    groups,
-    agents,
+    groups: groups.items,
+    agents: agents.items,
     enabledSkills,
     cachedSkills,
     theme: source.theme === "dark" ? "dark" : "light",
   };
 
-  const rawGroupCount = Array.isArray(source.groups) ? source.groups.length : 0;
-  const rawAgentCount = Array.isArray(source.agents) ? source.agents.length : 0;
-  if (groups.length < rawGroupCount)
+  if (groups.items.length < groups.rawCount)
     issues.push(createIssue("warning", "本地配置中有无效或重复的分组记录，已忽略。"));
-  if (renamedGroupCount)
+  if (groups.renamedCount)
     issues.push(
       createIssue(
         "warning",
-        `有 ${renamedGroupCount} 个分组名称重复，已自动添加序号区分。`,
+        `有 ${groups.renamedCount} 个分组名称重复，已自动添加序号区分。`,
       ),
     );
-  if (renamedAgentCount)
-    issues.push(
-      createIssue(
-        "warning",
-        `有 ${renamedAgentCount} 个 Agent 名称重复，已自动添加序号区分。`,
-      ),
-    );
-  if (agents.length < rawAgentCount)
+  if (agents.items.length < agents.rawCount)
     issues.push(createIssue("warning", "本地配置中有无效或重复的 Agent 记录，已忽略。"));
+  if (agents.renamedCount)
+    issues.push(
+      createIssue(
+        "warning",
+        `有 ${agents.renamedCount} 个 Agent 名称重复，已自动添加序号区分。`,
+      ),
+    );
   return { state, issues };
 }
 
@@ -232,7 +226,7 @@ function normalizeState(raw) {
  * 创建绑定到具体 uTools 环境的配置存储器。
  *
  * @param {object} utools - window.utools 实例
- * @returns {{read: Function, write: Function, clear: Function, directory: string, filePath: string}}
+ * @returns {{read: Function, write: Function, clear: Function}}
  * @throws {Error} 无法获取 uTools 用户数据目录时抛出
  */
 function createConfigStore(utools) {
@@ -333,13 +327,12 @@ function createConfigStore(utools) {
     }
   }
 
-  return { clear, directory, filePath, read, write };
+  return { clear, read, write };
 }
 
 module.exports = {
   MAX_ENTITY_NAME_LENGTH,
   createConfigStore,
   createDefaultState,
-  isPlainObject,
   uniqueEntityName,
 };

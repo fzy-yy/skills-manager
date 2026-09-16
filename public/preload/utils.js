@@ -136,6 +136,21 @@ function isInsideDirectoryLexical(parent, child) {
 }
 
 /**
+ * 纯词法判断两个目录是否存在重叠（相同或互相包含）。
+ * 用于拦截“仓库与 Agent 目录互相嵌套”的危险配置，避免扫描与链接相互影响。
+ *
+ * @param {string} left - 左路径
+ * @param {string} right - 右路径
+ * @returns {boolean} 两者相同或被任一方包含
+ */
+function pathsOverlapLexical(left, right) {
+  return (
+    isInsideDirectoryLexical(left, right) ||
+    isInsideDirectoryLexical(right, left)
+  );
+}
+
+/**
  * 判断目标是不是磁盘根目录（盘符根 C:\ 或 UNC 共享根）。
  *
  * @param {string} target - 待判断路径
@@ -188,15 +203,14 @@ async function normalizeDirectory(directory, label = "目录") {
 }
 
 module.exports = {
-  READ_TIMEOUT_MS,
   comparablePath,
   createIssue,
   errorMessage,
-  isDiskRoot,
   isInsideDirectoryLexical,
   normalizeDirectory,
   pathExists,
   pathsEqualLexical,
+  pathsOverlapLexical,
   uniqueIssues,
   withTimeout,
 };

@@ -10,12 +10,10 @@
 
 /** 一个被识别出来的 Skill（来自仓库扫描）。 */
 export interface SkillRecord {
-  /** 仓库相对路径（使用 / 分隔），同时作为 Skill 的唯一标识 */
+  /** Skill id：仓库第一层子目录名，同时是 Agent 目录中的链接名与唯一标识 */
   id: string;
-  /** SKILL.md 元数据中的 name */
+  /** SKILL.md 元数据中的 name（界面显示名） */
   name: string;
-  /** 目录名，决定链接在 Agent 目录中的名字 */
-  folderName: string;
   /** 仓库中的绝对路径 */
   sourcePath: string;
 }

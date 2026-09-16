@@ -87,7 +87,7 @@ export function useGroupDraft() {
   /**
    * 勾选/取消勾选一个 Skill（在草稿上操作，保存后生效）。
    *
-   * @param {string} skillId - Skill 的仓库相对路径 id
+   * @param {string} skillId - Skill id（仓库第一层子目录名）
    */
   function toggleSkill(skillId) {
     draftSkills.value = draftSkills.value.includes(skillId)
@@ -141,7 +141,6 @@ export function useGroupDraft() {
 
   return {
     createGroup,
-    draftDirty,
     draftName,
     draftSkills,
     remove,

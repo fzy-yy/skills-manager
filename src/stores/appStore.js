@@ -128,17 +128,19 @@ export const useAppStore = defineStore("app", () => {
   }
 
   // ============ 六、初始化与进入插件 ============
+  /** 读取 preload 的本地配置并合并到界面；失败时统一提示。 */
+  async function reloadState() {
+    try {
+      applyState(await backend().getState());
+    } catch (error) {
+      notify(error?.message || "读取本地配置失败", "error");
+    }
+  }
+
   /** 启动时读取本地配置；未运行在 uTools 中时退化为浅色主题的空状态。 */
   async function initialize() {
-    if (hasBackend()) {
-      try {
-        applyState(await backend().getState());
-      } catch (error) {
-        notify(error?.message || "读取本地配置失败", "error");
-      }
-    } else {
-      applyTheme("light");
-    }
+    if (hasBackend()) await reloadState();
+    else applyTheme("light");
     ready.value = true;
   }
 
@@ -148,12 +150,7 @@ export const useAppStore = defineStore("app", () => {
    * 避免界面长期停留在上次退出时的旧数据上（只读缓存、不扫描仓库）。
    */
   async function syncOnEnter() {
-    if (!hasBackend()) return;
-    try {
-      applyState(await backend().getState());
-    } catch (error) {
-      notify(error?.message || "读取本地配置失败", "error");
-    }
+    if (hasBackend()) await reloadState();
   }
 
   // ============ 七、业务动作 ============
@@ -222,17 +219,29 @@ export const useAppStore = defineStore("app", () => {
   }
 
   /**
+   * 执行一个只读操作（打开文件夹等）：不经过 busy 互斥，失败时统一提示。
+   *
+   * @param {() => Promise<void>} operation - 实际调用 preload 的只读动作
+   * @param {string} [fallbackMessage] - 错误对象无文案时的兜底提示
+   */
+  async function runReadOnly(operation, fallbackMessage = "操作失败，请重试") {
+    try {
+      await operation();
+    } catch (error) {
+      notify(error?.message || fallbackMessage, "error");
+    }
+  }
+
+  /**
    * 在系统文件管理器中打开某个 Skill 所在文件夹（对应 Skills 卡片双击）。
-   * 只读操作，不经过 busy 互斥，避免短时间连续双击被拦截。
    *
    * @param {string} skillId - Skill id
    */
-  async function openSkillFolder(skillId) {
-    try {
-      await backend().openSkillFolder(skillId);
-    } catch (error) {
-      notify(error?.message || "打开文件夹失败", "error");
-    }
+  function openSkillFolder(skillId) {
+    return runReadOnly(
+      () => backend().openSkillFolder(skillId),
+      "打开文件夹失败",
+    );
   }
 
   /**
@@ -240,12 +249,11 @@ export const useAppStore = defineStore("app", () => {
    *
    * @param {string} agentId - Agent id
    */
-  async function openAgentFolder(agentId) {
-    try {
-      await backend().openAgentFolder(agentId);
-    } catch (error) {
-      notify(error?.message || "打开文件夹失败", "error");
-    }
+  function openAgentFolder(agentId) {
+    return runReadOnly(
+      () => backend().openAgentFolder(agentId),
+      "打开文件夹失败",
+    );
   }
 
   /**

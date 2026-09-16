@@ -14,7 +14,6 @@ const props = defineProps({
   modelValue: { type: [String, Number], default: "" },
   options: { type: Array, default: () => [] },
   placeholder: { type: String, default: "请选择" },
-  disabled: Boolean,
 });
 const emit = defineEmits(["update:modelValue"]);
 const root = ref(null);
@@ -39,7 +38,7 @@ function select(option) {
 
 /** 展开菜单并聚焦当前选中项；未选择时聚焦首项或末项。 */
 async function openAndFocus(position = "selected") {
-  if (props.disabled || !props.options.length) return;
+  if (!props.options.length) return;
   open.value = true;
   await nextTick();
   const selectedIndex = props.options.findIndex(
@@ -117,8 +116,7 @@ onBeforeUnmount(() =>
     <button
       ref="trigger"
       type="button"
-      class="flex h-10 w-full items-center justify-between gap-3 rounded-md border border-border-strong bg-surface px-3 text-left text-ink outline-none hover:border-primary-border focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary-soft disabled:cursor-not-allowed disabled:opacity-50"
-      :disabled="disabled"
+      class="flex h-10 w-full items-center justify-between gap-3 rounded-md border border-border-strong bg-surface px-3 text-left text-ink outline-none hover:border-primary-border focus-visible:border-primary focus-visible:ring-2 focus-visible:ring-primary-soft"
       :aria-expanded="open"
       :aria-controls="listboxId"
       aria-haspopup="listbox"
