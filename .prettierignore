@@ -1,6 +1,0 @@
-# 构建产物、依赖与测试报告不参与格式化
-dist
-node_modules
-pnpm-lock.yaml
-playwright-report
-test-results

@@ -34,7 +34,7 @@ function edit(agent) {
 
 /**
  * 打开系统目录选择框并把结果写入表单。
- * 目录选择能力由 preload 服务的 chooseDirectory 提供；失败时已统一提示，返回空串表示未选择。
+ * 选择能力由 preload 提供；失败时已统一提示，返回空串表示未选择。
  */
 async function browse() {
   const selected = await store.chooseDirectory(directory.value);
@@ -43,22 +43,28 @@ async function browse() {
 
 /**
  * 保存 Agent（新增或更新），成功后回到新增模式并清空表单。
- * 服务端会校验目录合法性（不能是磁盘根目录、不能与仓库目录互相包含、不能与其他 Agent 重复）。
+ * 服务端会校验：目录必须存在、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合，
+ * 且必须为空目录——保证目录中的 Skills 链接全部由本插件管理。
  * 保存失败时表单内容原样保留，便于用户修正后重试。
  */
 async function save() {
   if (!name.value.trim() || !directory.value.trim())
     return store.notify("请完整填写 Agent 名称和 Skills 目录", "error");
-  const saved = await store.upsertAgent({
-    id: editingId.value || undefined,
-    name: name.value,
-    directory: directory.value,
-  });
+  const saved = editingId.value
+    ? await store.updateAgent({
+        id: editingId.value,
+        name: name.value,
+        directory: directory.value,
+      })
+    : await store.createAgent({
+        name: name.value,
+        directory: directory.value,
+      });
   if (saved) reset();
 }
 
 /**
- * 删除 Agent：确认后调用服务端删除，同时清理本应用在其目录创建的链接。
+ * 删除 Agent：确认后删除配置，并清理本应用在其目录创建的链接。
  * 若删除的正是当前编辑项，则同步重置表单。
  *
  * @param {{id: string, name: string}} agent - 被删除的 Agent
@@ -110,7 +116,7 @@ async function remove(agent) {
         ><PathPicker
           v-model="directory"
           input-id="agent-directory"
-          placeholder="选择 Agent 的 Skills 目录"
+          placeholder="选择一个空目录"
           :disabled="store.busy"
           @browse="browse"
         />
@@ -134,6 +140,11 @@ async function remove(agent) {
           {{ editingId ? "保存修改" : "添加 Agent" }}
         </button>
       </div>
+      <p
+        class="col-span-3 m-0 text-xs text-ink-muted max-[760px]:col-span-1"
+      >
+        Skills 目录必须为空目录：其中的链接全部由本插件创建与管理，插件不会修改目录中的其他内容。
+      </p>
     </div>
 
     <div v-if="store.agents.length" class="mt-4 grid gap-2">

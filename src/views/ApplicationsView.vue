@@ -30,7 +30,7 @@ const activeGroupIdSet = computed(
   () => new Set(activeGroups.value.map((group) => group.id)),
 );
 const syncIssues = computed(
-  () => store.agentSyncIssues[selectedAgentId.value] || [],
+  () => store.agentIssues[selectedAgentId.value] || [],
 );
 const syncHasErrors = computed(() =>
   syncIssues.value.some((issue) => issue.type === "error"),
@@ -47,24 +47,25 @@ watch(
 
 /**
  * 开启或关闭某个分组。
+ * 提交由 store 内部合并防抖，界面上的开关状态立即生效。
  *
  * @param {{id: string, skillIds: string[]}} group - 分组
  * @param {boolean} enabled - 开关的目标状态（true 为开启）
  */
-async function setGroup(group, enabled) {
+function setGroup(group, enabled) {
   const next = new Set(activeSkillIds.value);
   group.skillIds.forEach((skillId) =>
     enabled ? next.add(skillId) : next.delete(skillId),
   );
-  await store.setAgentSkills(selectedAgentId.value, [...next]);
+  store.setAgentSkills(selectedAgentId.value, [...next]);
 }
 
 /** 单独开启或关闭一个 Skill；覆盖完整分组时，左侧分组会自动联动。 */
-async function setSkill(skillId, enabled) {
+function setSkill(skillId, enabled) {
   const next = new Set(activeSkillIds.value);
   if (enabled) next.add(skillId);
   else next.delete(skillId);
-  await store.setAgentSkills(selectedAgentId.value, [...next]);
+  store.setAgentSkills(selectedAgentId.value, [...next]);
 }
 </script>
 
