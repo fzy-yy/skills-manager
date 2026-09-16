@@ -35,10 +35,21 @@ onMounted(() => {
   // 读取 uTools userData 下的本地配置，初始化仓库路径、分组、Agent 与主题。
   store.initialize();
   // initialize 内部已捕获异常并统一用全局提示告知用户，这里再包一层 try/catch 会造成同一错误提示两次。
-  // 每次从 uTools 搜索入口进入时回到仓库首页。
+  // uTools 没有提供 onPluginEnter / onPluginOut 的注销接口，因此这些回调只在根组件注册一次，
+  // 避免重复挂载造成多次跳转与重复提交。
   // window.utools 只在 uTools 环境中存在，浏览器预览时使用可选链跳过。
-  // uTools 没有提供 onPluginEnter 的注销接口，因此该回调只在根组件注册一次，避免重复挂载造成多次跳转。
-  window.utools?.onPluginEnter(() => router.push("/skills"));
+  //
+  // 每次从 uTools 搜索入口进入时回到仓库首页，并重读一次本地配置：
+  // 插件被隐藏到后台时进程不会重启、页面状态会保留，不重读就会一直显示上次退出时的旧数据。
+  window.utools?.onPluginEnter?.(() => {
+    router.push("/skills");
+    store.syncOnEnter();
+  });
+  // 隐藏到后台时异步提交可以继续完成；进程结束时 uTools 不会等待 Promise，
+  // 因此这里只做 best-effort 排空，最后选择已在点击时同步写入本机意图日志供下次恢复。
+  window.utools?.onPluginOut?.((isKill) => {
+    void store.flushPendingSkillSync(isKill ? { timeout: 0 } : undefined);
+  });
 });
 </script>
 
@@ -75,10 +86,7 @@ onMounted(() => {
       </div>
     </main>
 
-    <NoticeStack
-      :notices="store.notices"
-      @dismiss="store.dismissNotice"
-    />
+    <NoticeStack :notices="store.notices" @dismiss="store.dismissNotice" />
 
     <div
       v-if="store.busy"

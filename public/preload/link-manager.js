@@ -8,11 +8,11 @@ const {
   uniqueIssues,
   withReadTimeout,
 } = require("./runtime");
-const { pathsEqual } = require("./path-safety");
+const { pathsEqual, pathsEqualLexical } = require("./path-safety");
 const {
-  identitiesEqual,
   inspectLink,
   isDirectChild,
+  isOwnedLink,
   removeOwnedLink,
 } = require("./link-ownership");
 
@@ -50,7 +50,9 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
     const desiredSkillIds = new Set(config.enabledSkills[agent.id] || []);
     const skillById = new Map(scan.skills.map((skill) => [skill.id, skill]));
     const previousLinks = normalizeManagedLinks(agent.managedLinks);
-    const nextLinks = {};
+    // 使用无原型对象：skillId 取自仓库相对路径，理论上可能是 __proto__ 等特殊键名，
+    // 普通对象赋值会改写原型而不是新增记录，导致链接记录静默丢失。
+    const nextLinks = Object.create(null);
     const linked = [];
     const createdLinks = [];
     const finish = () => {
@@ -96,12 +98,7 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
       for (const [skillId, link] of Object.entries(previousLinks)) {
         if (!(await isDirectChild(agent.directory, link.linkPath))) continue;
         const inspected = await inspectLink(link.linkPath, link.sourcePath);
-        if (
-          inspected.kind === "link" &&
-          inspected.sameTarget &&
-          identitiesEqual(link.identity, inspected.identity)
-        )
-          linked.push(skillId);
+        if (isOwnedLink(link, inspected)) linked.push(skillId);
       }
       agent.managedLinks = previousLinks;
       return finish();
@@ -118,19 +115,26 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
         );
         continue;
       }
-      const shouldKeep =
-        desiredSkillIds.has(skillId) && (skill || !scan.complete);
-      const currentSource = skill?.sourcePath || link.sourcePath;
       const inspected = await inspectLink(link.linkPath, link.sourcePath);
-      const stillOwned =
-        inspected.kind === "link" &&
-        inspected.sameTarget &&
-        identitiesEqual(link.identity, inspected.identity);
-      if (
-        shouldKeep &&
+      // pending 记录是本应用在创建链接之前写入的检查点，路径仍是同源链接即可确认归属；
+      // 其他记录必须文件标识完全一致，才能证明仍是本应用创建的那条链接。
+      const stillOwned = isOwnedLink(link, inspected);
+      const expectedLinkPath = skill
+        ? path.join(agent.directory, skill.folderName)
+        : "";
+      // 保留条件：仍然启用、链接仍归本应用，且扫描结果足以支持保留——
+      //  - 扫描完整时，Skill 必须仍在仓库中且源路径未变（变了就重建指向新路径的链接）；
+      //  - 扫描不完整时，不冒险重建，直接保留现有链接与指向。
+      const keep =
+        desiredSkillIds.has(skillId) &&
         stillOwned &&
-        (await pathsEqual(link.sourcePath, currentSource))
-      ) {
+        (!skill || pathsEqualLexical(link.linkPath, expectedLinkPath)) &&
+        (skill || !scan.complete) &&
+        (scan.complete
+          ? await pathsEqual(link.sourcePath, skill.sourcePath)
+          : true);
+      if (keep) {
+        // pending 记录在这里补记文件标识，避免长期停留在「归属待确认」状态。
         nextLinks[skillId] = link.pending
           ? {
               linkPath: link.linkPath,
@@ -141,18 +145,15 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
         linked.push(skillId);
         continue;
       }
-      if (shouldKeep && !scan.complete && stillOwned) {
-        nextLinks[skillId] = link;
-        linked.push(skillId);
-        continue;
-      }
       const removal = await removeOwnedLink(
         link,
         `Agent“${agent.name}”中的受管链接 ${link.linkPath}`,
         agent.directory,
       );
       issues.push(...removal.issues);
-      if (!removal.relinquished) nextLinks[skillId] = link;
+      // 未放弃管理时保留记录；若链接已被隔离到随机路径，则改用隔离路径继续追踪。
+      if (!removal.relinquished)
+        nextLinks[skillId] = removal.remainingLink || link;
       if (scan.complete && !skill && removal.removed) {
         issues.push(
           createIssue(
@@ -253,14 +254,16 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
           issues.push(
             createIssue(
               "warning",
-              `“${skill.name}”链接已创建，但无法记录文件标识：${errorMessage(error)}。后续仍会按链接目标安全管理。`,
+              `“${skill.name}”链接已创建，但暂时无法记录文件标识：${errorMessage(error)}。已保留创建检查点，下次同步会自动补记。`,
             ),
           );
         }
         nextLinks[skill.id] = {
           linkPath,
           sourcePath: skill.sourcePath,
-          ...(identity ? { identity } : {}),
+          // 读不到文件标识时保留 pending 检查点：下次同步凭「检查点 + 同源链接」补记标识，
+          // 而不是把这条由本应用创建的链接当成外部链接放弃管理。
+          ...(identity ? { identity } : { pending: true }),
         };
         createdLinks.push({ skillId: skill.id, ...nextLinks[skill.id] });
         linked.push(skill.id);
@@ -294,7 +297,7 @@ function createLinkManager({ normalizeManagedLinks, writeConfig }) {
     return results;
   }
 
-  return { removeOwnedLink, syncAgent, syncAllAgents };
+  return { syncAgent, syncAllAgents };
 }
 
 module.exports = { createLinkManager };

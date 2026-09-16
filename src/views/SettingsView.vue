@@ -25,9 +25,7 @@ async function selectTheme(theme) {
 /**
  * 清除本地数据：先二次确认，再调用服务端清理。
  * 服务端只删除仍可识别的「受管链接」，源文件与他人创建的内容一律保留。
- *
- * @returns {Promise<void>} 用户取消或清理完成后结束
- * @throws {never} 清理失败由 store.execute 统一提示，页面无需额外处理
+ * 失败信息由 store 统一提示。
  */
 async function clearData() {
   const accepted = await store.confirm({
@@ -38,9 +36,7 @@ async function clearData() {
     tone: "danger",
   });
   if (!accepted) return;
-  try {
-    await store.clearData();
-  } catch (_) {}
+  await store.clearData();
 }
 </script>
 

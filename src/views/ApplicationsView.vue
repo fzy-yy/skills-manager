@@ -4,7 +4,7 @@ import { computed, ref, watch } from "vue";
 import BaseSelect from "../components/BaseSelect.vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
-import ToggleSwitch from "../components/ToggleSwitch.vue";
+import ToggleRow from "../components/ToggleRow.vue";
 import { useAppStore } from "../stores/appStore";
 
 const store = useAppStore();
@@ -56,9 +56,7 @@ async function setGroup(group, enabled) {
   group.skillIds.forEach((skillId) =>
     enabled ? next.add(skillId) : next.delete(skillId),
   );
-  try {
-    await store.setAgentSkills(selectedAgentId.value, [...next]);
-  } catch (_) {}
+  await store.setAgentSkills(selectedAgentId.value, [...next]);
 }
 
 /** 单独开启或关闭一个 Skill；覆盖完整分组时，左侧分组会自动联动。 */
@@ -66,9 +64,7 @@ async function setSkill(skillId, enabled) {
   const next = new Set(activeSkillIds.value);
   if (enabled) next.add(skillId);
   else next.delete(skillId);
-  try {
-    await store.setAgentSkills(selectedAgentId.value, [...next]);
-  } catch (_) {}
+  await store.setAgentSkills(selectedAgentId.value, [...next]);
 }
 </script>
 
@@ -165,30 +161,17 @@ async function setSkill(skillId, enabled) {
           </header>
 
           <template v-if="store.groups.length">
-            <div
+            <ToggleRow
               v-for="group in store.groups"
               :key="group.id"
-              class="grid min-h-16.5 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-3 last:border-b-0"
-            >
-              <div
-                class="grid size-9.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
-              >
-                <Layers3 :size="18" :stroke-width="1.8" />
-              </div>
-              <div class="flex min-w-0 flex-1 flex-col gap-1">
-                <strong class="truncate">{{ group.name }}</strong>
-                <span class="text-xs text-ink-muted"
-                  >{{ group.skillIds.length }} 个 Skills</span
-                >
-              </div>
-              <ToggleSwitch
-                class="justify-self-end"
-                :model-value="activeGroupIdSet.has(group.id)"
-                :disabled="store.busy || !group.skillIds.length"
-                :label="`${group.name} 分组开关`"
-                @update:model-value="setGroup(group, $event)"
-              />
-            </div>
+              :icon="Layers3"
+              :title="group.name"
+              :subtitle="`${group.skillIds.length} 个 Skills`"
+              :model-value="activeGroupIdSet.has(group.id)"
+              :disabled="store.busy || !group.skillIds.length"
+              :label="`${group.name} 分组开关`"
+              @update:model-value="setGroup(group, $event)"
+            />
           </template>
           <EmptyState
             v-else
@@ -212,27 +195,16 @@ async function setSkill(skillId, enabled) {
           </header>
 
           <template v-if="store.skills.length">
-            <div
+            <ToggleRow
               v-for="skill in store.skills"
               :key="skill.id"
-              class="grid min-h-14 grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 border-b border-border px-4 py-2.5 last:border-b-0"
-            >
-              <div
-                class="grid size-8.5 shrink-0 place-items-center rounded-lg bg-primary-soft text-primary"
-              >
-                <Puzzle :size="16" :stroke-width="1.8" />
-              </div>
-              <strong class="min-w-0 flex-1 truncate text-sm">{{
-                skill.name
-              }}</strong>
-              <ToggleSwitch
-                class="justify-self-end"
-                :model-value="activeSkillSet.has(skill.id)"
-                :disabled="store.busy"
-                :label="`${skill.name} Skill 开关`"
-                @update:model-value="setSkill(skill.id, $event)"
-              />
-            </div>
+              :icon="Puzzle"
+              :title="skill.name"
+              :model-value="activeSkillSet.has(skill.id)"
+              :disabled="store.busy"
+              :label="`${skill.name} Skill 开关`"
+              @update:model-value="setSkill(skill.id, $event)"
+            />
           </template>
           <EmptyState
             v-else

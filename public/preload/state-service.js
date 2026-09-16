@@ -2,19 +2,34 @@
  * 扫描结果、启用状态与受管链接的业务收敛层。
  */
 const { createIssue, uniqueIssues } = require("./runtime");
-const {
-  attachRuntime,
-  clearStoredConfig,
-  createDefaultConfig,
-  normalizeCachedSkills,
-  normalizeManagedLinks,
-  writeConfig,
-} = require("./config-store");
+const defaultConfigStore = require("./config-store");
+const { removeOwnedLink } = require("./link-ownership");
 const { normalizeDirectory } = require("./path-safety");
+const { createSyncPersistence } = require("./sync-persistence");
 
-function createStateService({ scanner, linkManager }) {
+/**
+ * @param {{scanner: object, linkManager: object, configStore?: object}} dependencies
+ *        configStore 可注入，便于集成测试脱离 uTools 存储直接验证编排逻辑。
+ */
+function createStateService({
+  scanner,
+  linkManager,
+  configStore = defaultConfigStore,
+}) {
+  const {
+    attachRuntime,
+    clearStoredConfig,
+    createDefaultConfig,
+    normalizeCachedSkills,
+    normalizeManagedLinks,
+    writeConfig,
+  } = configStore;
   const { inspectEnabledCachedSkills, scanConfiguredRepository } = scanner;
-  const { removeOwnedLink, syncAgent, syncAllAgents } = linkManager;
+  const { syncAgent, syncAllAgents } = linkManager;
+  const { persistSyncResults } = createSyncPersistence({
+    writeConfig,
+    removeOwnedLink,
+  });
 
   function reconcileDeletedSkills(config, scan) {
     if (!scan.complete || scan.locked) return [];
@@ -72,6 +87,22 @@ function createStateService({ scanner, linkManager }) {
   }
 
   /**
+   * 只归属到单个 Agent 的问题：该 Agent 的定向扫描问题 + 其链接同步问题。
+   * 不含配置读取等全局问题，避免前端把它们显示成某个 Agent 的链接问题。
+   *
+   * @param {string} agentId - Agent id
+   * @param {object} targetedScan - inspectEnabledCachedSkills 的返回值
+   * @param {object} syncResults - { [agentId]: syncAgent 的返回值 }
+   * @returns {Array} 去重后的问题列表
+   */
+  function collectAgentIssues(agentId, targetedScan, syncResults) {
+    return uniqueIssues([
+      ...(targetedScan?.issues || []),
+      ...(syncResults?.[agentId]?.issues || []),
+    ]);
+  }
+
+  /**
    * 把内部 Agent 结构转换为前端需要的公开结构。
    *
    * @param {object} agent - 内部 Agent 对象
@@ -88,17 +119,16 @@ function createStateService({ scanner, linkManager }) {
   /**
    * 组装返回给前端的状态对象（前端 applyState 会逐字段合并）。
    *
+   * emptyRepository 按存在性可选：只有本次结果确实包含该判定时才输出。
+   * 定向同步、缓存读取等非仓库扫描操作不得覆盖前端保留的空仓库确认状态。
+   *
    * @param {object} config - 当前配置
-   * @param {{skills?: Array}} [scan={ skills: [] }] - 仓库扫描结果
+   * @param {{skills?: Array, emptyRepository?: boolean}} [scan={ skills: [] }] - 仓库扫描结果
    * @param {Array} [issues=[]] - 需要展示的问题列表
    * @returns {object} 前端可用的完整状态
    */
-  function buildState(
-    config,
-    scan = { skills: [] },
-    issues = [],
-  ) {
-    return {
+  function buildState(config, scan = { skills: [] }, issues = []) {
+    const state = {
       repositoryPath: config.repositoryPath,
       skills: scan.skills || [],
       groups: config.groups,
@@ -107,61 +137,9 @@ function createStateService({ scanner, linkManager }) {
       theme: config.theme === "dark" ? "dark" : "light",
       issues: uniqueIssues(issues),
     };
-  }
-
-  /**
-   * 保存同步后的链接状态；保存失败时安全回滚本轮新建链接，并重试记录最终状态。
-   *
-   * @param {object} config - 当前完整配置
-   * @param {object} syncResults - 本轮参与同步的 Agent 结果
-   * @returns {Promise<Array>} 持久化或回滚期间产生的问题
-   */
-  async function persistSyncResults(config, syncResults) {
-    const persistenceIssues = [];
-    if (config._syncLocked) return persistenceIssues;
-    try {
-      await writeConfig(config);
-    } catch (error) {
-      const rollbackIssues = [];
-      for (const agent of config.agents) {
-        const createdLinks = syncResults[agent.id]?.createdLinks || [];
-        for (const link of createdLinks) {
-          const removal = await removeOwnedLink(
-            link,
-            `保存失败后的新建链接 ${link.linkPath}`,
-            agent.directory,
-          );
-          rollbackIssues.push(...removal.issues);
-          if (removal.relinquished) {
-            delete agent.managedLinks[link.skillId];
-            const syncResult = syncResults[agent.id];
-            syncResult.linked = syncResult.linked.filter(
-              (id) => id !== link.skillId,
-            );
-          }
-        }
-      }
-      try {
-        await writeConfig(config);
-        const detail = rollbackIssues.length
-          ? `部分新建链接未能回滚，但其受管记录已保留：${rollbackIssues.map((issue) => issue.message).join("；")}`
-          : "本轮新建链接已回滚，本地配置重试保存成功";
-        persistenceIssues.push(
-          createIssue("warning", `${error.message}；${detail}。`),
-        );
-      } catch (retryError) {
-        const detail = rollbackIssues.length
-          ? `；新建链接回滚存在问题：${rollbackIssues.map((issue) => issue.message).join("；")}`
-          : "；本轮新建链接已回滚，其余状态将在下次启动时按安全检查点自动收敛";
-        persistenceIssues.push(
-          createIssue(
-            "error",
-            `${error.message}；重试保存仍失败：${retryError.message}${detail}`,
-          ),
-        );
-      }
-    }
-    return persistenceIssues;
+    if (typeof scan.emptyRepository === "boolean")
+      state.emptyRepository = scan.emptyRepository;
+    return state;
   }
 
   /**
@@ -171,11 +149,13 @@ function createStateService({ scanner, linkManager }) {
    * 删除结果则可依据检查点在下次启动时安全收敛。
    *
    * @param {object} config - 已读取（可能已修改）的配置对象
+   * @param {{allowEmptyRepository?: boolean}} [options] - 用户已二次确认"仓库确实已清空"时，
+   *        允许按空仓库收敛并清理失效引用与链接
    * @returns {object} 前端可用的完整状态
    * @throws {Error} 恢复检查点无法写入时抛出，且不会执行任何文件操作
    */
-  async function refreshState(config) {
-    const scan = await scanConfiguredRepository(config);
+  async function refreshState(config, options = {}) {
+    const scan = await scanConfiguredRepository(config, options);
     if (scan.complete && !scan.locked)
       config._cachedSkills = normalizeCachedSkills(scan.skills);
     const reconciledIssues = reconcileDeletedSkills(config, scan);
@@ -185,16 +165,81 @@ function createStateService({ scanner, linkManager }) {
       : await cleanupOrphanAgents(config);
     const syncResults = await syncAllAgents(config, scan);
     const persistenceIssues = await persistSyncResults(config, syncResults);
-    return buildState(
+    // 扫描不完整时回退到最近一次成功扫描的结果，避免出现
+    //「提示说配置已保留、界面却清空」的矛盾状态。
+    const visibleSkills = scan.complete
+      ? scan.skills
+      : config._cachedSkills || [];
+    const fallbackIssues =
+      !scan.complete && visibleSkills.length
+        ? [
+            createIssue(
+              "info",
+              "本次未完成扫描，Skills 列表显示的是上次成功扫描的结果。",
+            ),
+          ]
+        : [];
+    const scanState = { ...scan, skills: visibleSkills };
+    // 只有真实仓库扫描才能给出 emptyRepository 结论：
+    // 被拦下的空仓库明确为 true；成功完成的扫描明确为 false；其余情况不输出该字段。
+    if (scan.emptyRepository === true) scanState.emptyRepository = true;
+    else if (scan.complete === true) scanState.emptyRepository = false;
+    const state = buildState(
       config,
-      scan,
+      scanState,
       collectIssues(scan, syncResults, [
         ...(config._issues || []),
         ...reconciledIssues,
         ...orphanIssues,
         ...persistenceIssues,
+        ...fallbackIssues,
       ]),
     );
+    state.agentIssues = Object.fromEntries(
+      config.agents.map((agent) => [
+        agent.id,
+        uniqueIssues(syncResults[agent.id]?.issues || []),
+      ]),
+    );
+    return state;
+  }
+
+  /**
+   * 定向同步的公共编排：写检查点 →（可选）清理孤儿 → 定向校验缓存 → 同步该 Agent → 持久化。
+   *
+   * @param {object} config - 当前配置
+   * @param {object} agent - 目标 Agent
+   * @param {{cleanupOrphans?: boolean, previousSkillIds?: string[]}} [options]
+   * @returns {object} 含 agentIssues 的前端状态
+   */
+  async function runTargetedSync(config, agent, options = {}) {
+    const { cleanupOrphans = false, previousSkillIds = [] } = options;
+    await writeConfig(config);
+    const orphanIssues = cleanupOrphans
+      ? await cleanupOrphanAgents(config)
+      : [];
+    const targetedScan = await inspectEnabledCachedSkills(
+      config,
+      agent,
+      previousSkillIds,
+    );
+    const syncResults = {
+      [agent.id]: await syncAgent(config, agent, targetedScan),
+    };
+    const persistenceIssues = await persistSyncResults(config, syncResults);
+    const state = buildState(
+      config,
+      { skills: config._cachedSkills || [] },
+      collectIssues(targetedScan, syncResults, [
+        ...(config._issues || []),
+        ...orphanIssues,
+        ...persistenceIssues,
+      ]),
+    );
+    state.agentIssues = {
+      [agent.id]: collectAgentIssues(agent.id, targetedScan, syncResults),
+    };
+    return state;
   }
 
   /**
@@ -202,24 +247,7 @@ function createStateService({ scanner, linkManager }) {
    * 使用最近一次完整扫描缓存并逐项验证源目录，避免每次点击都递归遍历整个仓库。
    */
   async function syncAgentSkillsState(config, agent, previousSkillIds) {
-    const targetedScan = await inspectEnabledCachedSkills(
-      config,
-      agent,
-      previousSkillIds,
-    );
-    await writeConfig(config);
-    const syncResults = {
-      [agent.id]: await syncAgent(config, agent, targetedScan),
-    };
-    const persistenceIssues = await persistSyncResults(config, syncResults);
-    return buildState(
-      config,
-      { skills: config._cachedSkills || [] },
-      collectIssues(targetedScan, syncResults, [
-        ...(config._issues || []),
-        ...persistenceIssues,
-      ]),
-    );
+    return runTargetedSync(config, agent, { previousSkillIds });
   }
 
   /** 返回最近一次扫描缓存，不触发仓库或 Agent 目录访问。 */
@@ -231,23 +259,24 @@ function createStateService({ scanner, linkManager }) {
     );
   }
 
-  /** Agent 更换目录时只清理旧目录并同步当前 Agent。 */
+  /**
+   * Agent 更换目录时只清理旧目录并同步当前 Agent。
+   * 旧目录会先作为孤儿记录等待清理，因此必须开启 cleanupOrphans。
+   */
   async function syncMovedAgentState(config, agent) {
-    await writeConfig(config);
-    const orphanIssues = await cleanupOrphanAgents(config);
-    const targetedScan = await inspectEnabledCachedSkills(config, agent, []);
-    const syncResults = {
-      [agent.id]: await syncAgent(config, agent, targetedScan),
-    };
-    const persistenceIssues = await persistSyncResults(config, syncResults);
-    return getCachedState(
-      config,
-      collectIssues(targetedScan, syncResults, [
-        ...(config._issues || []),
-        ...orphanIssues,
-        ...persistenceIssues,
-      ]),
-    );
+    return runTargetedSync(config, agent, { cleanupOrphans: true });
+  }
+
+  /**
+   * 首次为已存在的 Agent 绑定目录：旧目录为空，无需清理孤儿，只需把当前已启用 Skill 同步进新目录。
+   * 与 syncMovedAgentState 区分开，避免“首次绑定”被当成迁移处理。
+   *
+   * @param {object} config - 当前配置（Agent 的 directory 已更新为新目录）
+   * @param {object} agent - 目标 Agent
+   * @returns {object} 含 agentIssues 的前端状态
+   */
+  async function bindAgentDirectoryState(config, agent) {
+    return runTargetedSync(config, agent, { cleanupOrphans: false });
   }
 
   /** 删除 Agent 后只处理其孤儿链接，不扫描仓库或同步其他 Agent。 */
@@ -265,6 +294,7 @@ function createStateService({ scanner, linkManager }) {
       _syncLocked: false,
       _orphanAgents: [...config.agents, ...(config._orphanAgents || [])],
       _cachedSkills: [],
+      _revision: config._revision || "",
     });
     await writeConfig(cleared);
     const issues = await cleanupOrphanAgents(cleared);
@@ -277,7 +307,33 @@ function createStateService({ scanner, linkManager }) {
       );
     if (cleared._orphanAgents.length) await writeConfig(cleared);
     else await clearStoredConfig();
-    return buildState(createDefaultConfig(), { skills: [] }, uniqueIssues(issues));
+    return buildState(
+      createDefaultConfig(),
+      { skills: [], emptyRepository: false },
+      uniqueIssues(issues),
+    );
+  }
+
+  /**
+   * 配置无法解析时的恢复出口（对应“双损坏后仍能清除数据”）。
+   *
+   * 不依赖成功读取配置：直接清除本地存储并返回默认状态。
+   * 由于读不到受管链接记录，只清配置、不尝试删除任何 Agent 目录中的内容。
+   *
+   * @returns {object} 默认状态，并附带说明问题
+   */
+  async function clearUnreadableDataState() {
+    await clearStoredConfig();
+    return buildState(
+      createDefaultConfig(),
+      { skills: [], emptyRepository: false },
+      [
+        createIssue(
+          "warning",
+          "本地配置无法解析，已直接清除本地配置并恢复默认状态。因无法读取受管链接记录，未删除任何 Agent 目录中的内容；如需清理链接，请重新配置目录后再处理。",
+        ),
+      ],
+    );
   }
 
   /**
@@ -289,7 +345,10 @@ function createStateService({ scanner, linkManager }) {
   async function cleanupAgentLinks(agent) {
     const issues = [];
     try {
-      await normalizeDirectory(agent.directory, `Agent“${agent.name}”的 Skills 目录`);
+      await normalizeDirectory(
+        agent.directory,
+        `Agent“${agent.name}”的 Skills 目录`,
+      );
     } catch (error) {
       return [
         createIssue(
@@ -298,7 +357,8 @@ function createStateService({ scanner, linkManager }) {
         ),
       ];
     }
-    const remaining = {};
+    // 与 link-manager 一致：skillId 可能是 __proto__ 等特殊键名，必须用无原型对象承载。
+    const remaining = Object.create(null);
     for (const [skillId, link] of Object.entries(
       normalizeManagedLinks(agent.managedLinks),
     )) {
@@ -308,7 +368,9 @@ function createStateService({ scanner, linkManager }) {
         agent.directory,
       );
       issues.push(...removal.issues);
-      if (!removal.relinquished) remaining[skillId] = link;
+      // 未放弃管理时保留记录；若链接已被隔离，则记录隔离路径以便继续追踪。
+      if (!removal.relinquished)
+        remaining[skillId] = removal.remainingLink || link;
     }
     agent.managedLinks = remaining;
     return uniqueIssues(issues);
@@ -327,23 +389,10 @@ function createStateService({ scanner, linkManager }) {
     return uniqueIssues(issues);
   }
 
-  /**
-   * 写操作前的守卫：配置处于只读保护时，禁止任何会改动配置文件或链接的操作。
-   *
-   * @param {object} config - 当前配置
-   * @throws {Error} 配置处于只读保护时抛出
-   */
-  function assertConfigWritable(config) {
-    if (config._syncLocked)
-      throw new Error(
-        "本地配置文件关键数据异常，当前处于只读保护。请先在设置页清除数据，再重新配置。",
-      );
-  }
-
-
   return {
-    assertConfigWritable,
+    bindAgentDirectoryState,
     clearDataState,
+    clearUnreadableDataState,
     deleteAgentState,
     getCachedState,
     refreshState,

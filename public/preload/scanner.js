@@ -1,6 +1,10 @@
-/** Skills 仓库扫描器：负责元数据解析、受限遍历和定向缓存校验。 */
-const fs = require("node:fs");
-const fsp = fs.promises;
+/**
+ * Skills 仓库扫描器：受限遍历、空仓库防护与定向缓存校验。
+ *
+ * SKILL.md 的元数据解析在 skill-metadata.js；本文件只负责"怎么遍历、怎么判定完整、
+ * 以及什么时候必须停下清理动作"。
+ */
+const fsp = require("node:fs").promises;
 const path = require("node:path");
 const {
   createIssue,
@@ -9,118 +13,47 @@ const {
   uniqueIssues,
   withReadTimeout,
 } = require("./runtime");
-const { isInsideDirectory, normalizeDirectory } = require("./path-safety");
+const {
+  hasValidSkillFile,
+  readSkillNameDetailed,
+} = require("./skill-metadata");
+const {
+  assertNotDiskRoot,
+  canonicalDirectory,
+  isInsideDirectoryLexical,
+  normalizeDirectory,
+} = require("./path-safety");
 
 const MAX_SCAN_DIRECTORIES = 20_000;
 const MAX_SCAN_DEPTH = 64;
 const MAX_SCAN_DURATION_MS = 30_000;
 const MAX_SCAN_ISSUES = 50;
-const MAX_SKILL_FILE_BYTES = 2 * 1024 * 1024;
-const MAX_SKILL_NAME_LENGTH = 200;
 const READ_VALIDATION_CONCURRENCY = 8;
 
 function createScanner({ normalizeCachedSkills }) {
-  /**
-   * 读取并解析 SKILL.md 的 YAML 元数据中的 name 字段（不引入第三方 YAML 依赖）。
-   * 支持单引号、双引号与裸值三种写法，并允许行尾注释。
-   *
-   * @param {string} skillFile - SKILL.md 的绝对路径
-   * @returns {{name: string, error: string, incomplete?: boolean}} incomplete 表示文件暂时无法读取，不能据此清理 Skill
-   */
-  async function readSkillNameDetailed(skillFile) {
-    let content;
-    try {
-      const stat = await withReadTimeout(
-        fsp.stat(skillFile),
-        `检查 Skill 文件 ${skillFile}`,
-      );
-      if (stat.size > MAX_SKILL_FILE_BYTES) {
-        return {
-          name: "",
-          error: `${skillFile} 超过 ${MAX_SKILL_FILE_BYTES / 1024 / 1024} MB，已拒绝读取`,
-          incomplete: true,
-        };
-      }
-      content = await withReadTimeout(
-        fsp.readFile(skillFile, "utf8"),
-        `读取 Skill 文件 ${skillFile}`,
-      );
-    } catch (error) {
-      return {
-        name: "",
-        error: `无法读取 ${skillFile}：${errorMessage(error)}`,
-        incomplete: true,
-      };
-    }
-    const frontmatter = content.match(
-      /^\uFEFF?---\s*\r?\n([\s\S]*?)\r?\n---(?:\s*\r?\n|$)/,
-    );
-    if (!frontmatter)
-      return {
-        name: "",
-        error: `${skillFile} 缺少有效的 YAML 元数据`,
-        incomplete: true,
-      };
-    const nameLine = frontmatter[1]
-      .split(/\r?\n/)
-      .find((line) => /^\s*name\s*:/.test(line));
-    if (!nameLine)
-      return {
-        name: "",
-        error: `${skillFile} 的元数据缺少 name 字段`,
-        incomplete: true,
-      };
-    const rawValue = nameLine.replace(/^\s*name\s*:\s*/, "").trim();
-    let name = "";
-    try {
-      if (rawValue.startsWith('"')) {
-        const quoted = rawValue.match(/^("(?:\\.|[^"\\])*")\s*(?:#.*)?$/);
-        if (!quoted) throw new Error("双引号未正确闭合");
-        name = JSON.parse(quoted[1]);
-      } else if (rawValue.startsWith("'")) {
-        const quoted = rawValue.match(/^'((?:''|[^'])*)'\s*(?:#.*)?$/);
-        if (!quoted) throw new Error("单引号未正确闭合");
-        name = quoted[1].replace(/''/g, "'");
-      } else {
-        name = rawValue.replace(/\s+#.*$/, "").trim();
-      }
-    } catch (error) {
-      return {
-        name: "",
-        error: `${skillFile} 的 name 字段无效：${errorMessage(error)}`,
-        incomplete: true,
-      };
-    }
-    name = String(name).trim();
-    if (name.length > MAX_SKILL_NAME_LENGTH)
-      return {
-        name: "",
-        error: `${skillFile} 的 name 字段超过 ${MAX_SKILL_NAME_LENGTH} 个字符`,
-        incomplete: true,
-      };
-    return name
-      ? { name, error: "" }
-      : {
-          name: "",
-          error: `${skillFile} 的 name 字段为空`,
-          incomplete: true,
-        };
-  }
-
   /**
    * 递归扫描仓库目录，找出所有包含 SKILL.md 的 Skill 目录。
    *
    * 规则：
    *  - 某个目录中存在 SKILL.md（大小写不敏感）时，该目录即视为一个 Skill，且不再向下递归；
    *  - 跳过符号链接、node_modules 与 .git 目录，避免死循环与无关内容；
-   *  - 只要有一个子目录读不到，就把 complete 置为 false，用于阻止后续清理动作。
+   *  - 只要有一处无法确认（目录读不到、SKILL.md 解析不出 name、达到上限），
+   *    就把 complete 置为 false，用于阻止后续清理动作。
    *
    * @param {string} repositoryPath - 仓库根目录绝对路径
    * @returns {{skills: Array, issues: Array, complete: boolean}} 扫描结果、问题列表与扫描是否完整
    */
   async function scanSkills(repositoryPath) {
-    if (!repositoryPath) return { skills: [], issues: [], complete: true };
+    if (!repositoryPath)
+      return {
+        skills: [],
+        issues: [createIssue("error", "Skills 仓库路径为空，未执行扫描。")],
+        complete: false,
+      };
     const root = await normalizeDirectory(repositoryPath, "Skills 仓库目录");
+    // 二次防线：即使调用方漏检，扫描器也拒绝对磁盘根目录（含伪装的 junction）执行扫描。
+    // normalizeDirectory 已把 junction / 符号链接解析为 canonical 路径，因此这里能识别真实根目录。
+    assertNotDiskRoot(root, "Skills 仓库");
     const skills = [];
     const issues = [];
     let complete = true;
@@ -190,11 +123,11 @@ function createScanner({ normalizeCachedSkills }) {
           });
           continue;
         }
-        if (result.incomplete) complete = false;
+        if (result.blocksCleanup) complete = false;
         pushIssue(
           createIssue(
-            result.incomplete ? "error" : "warning",
-            `${result.error}，该目录已忽略。${result.incomplete ? "为防止误删，本次不会清理缺失项。" : ""}`,
+            "error",
+            `${result.error}，该目录已忽略。为防止误删，本次不会清理缺失项。`,
           ),
         );
       }
@@ -240,13 +173,21 @@ function createScanner({ normalizeCachedSkills }) {
    * 扫描当前配置指向的仓库目录，并把「配置异常」转换为可展示的问题。
    *
    * @param {object} config - 当前配置（可能带 _syncLocked 标记）
-   * @returns {{skills: Array, issues: Array, complete: boolean, locked?: boolean}} 扫描结果
+   * @param {{allowEmptyRepository?: boolean}} [options] - allowEmptyRepository 为用户已二次确认
+   *        "仓库确实已清空"时使用，此时允许按空仓库收敛并清理失效引用与链接
+   * @returns {{skills: Array, issues: Array, complete: boolean, locked?: boolean, emptyRepository?: boolean}}
+   *          扫描结果；emptyRepository 表示本次因"仓库为空"而被拦下
    */
-  async function scanConfiguredRepository(config) {
+  async function scanConfiguredRepository(config, options = {}) {
+    const allowEmptyRepository = options.allowEmptyRepository === true;
     const hasDependentData =
       config.groups.some((group) => group.skillIds.length) ||
-      config.agents.some((agent) => Object.keys(agent.managedLinks).length);
-    if (!config.repositoryPath && hasDependentData) {
+      config.agents.some(
+        (agent) =>
+          Object.keys(agent.managedLinks).length ||
+          (config.enabledSkills[agent.id] || []).length,
+      );
+    if (!config.repositoryPath) {
       return {
         skills: [],
         complete: false,
@@ -254,7 +195,9 @@ function createScanner({ normalizeCachedSkills }) {
         issues: [
           createIssue(
             "error",
-            "Skills 仓库路径缺失，但仍存在分组或链接记录。为防止误删，现有配置和链接已保留。",
+            hasDependentData
+              ? "Skills 仓库路径缺失，但仍存在分组或链接记录。为防止误删，现有配置和链接已保留。"
+              : "尚未配置 Skills 仓库目录，无法扫描。",
           ),
         ],
       };
@@ -263,14 +206,16 @@ function createScanner({ normalizeCachedSkills }) {
       const scan = await scanSkills(config.repositoryPath);
       if (
         scan.complete &&
+        !allowEmptyRepository &&
         normalizeCachedSkills(config._cachedSkills).length > 0 &&
         scan.skills.length === 0
       ) {
         scan.complete = false;
+        scan.emptyRepository = true;
         scan.issues.push(
           createIssue(
             "error",
-            "仓库本次未检测到任何 Skill。为防止临时空目录导致误删，现有分组、选择和链接已保留。",
+            "仓库本次未检测到任何 Skill。为防止临时空目录导致误删，现有分组、选择和链接已保留；若确认仓库已清空，可使用页面上的“确认仓库已清空”按钮清理失效记录。",
           ),
         );
       }
@@ -326,9 +271,23 @@ function createScanner({ normalizeCachedSkills }) {
             ),
           };
         }
-        const insideRepository =
-          config.repositoryPath &&
-          (await isInsideDirectory(config.repositoryPath, skill.sourcePath));
+        let insideRepository = false;
+        if (config.repositoryPath) {
+          try {
+            const [repositoryReal, sourceReal] = await Promise.all([
+              canonicalDirectory(config.repositoryPath, "Skills 仓库目录"),
+              canonicalDirectory(skill.sourcePath, "Skill 源目录"),
+            ]);
+            insideRepository = isInsideDirectoryLexical(
+              repositoryReal,
+              sourceReal,
+            );
+          } catch (_) {
+            // 无法把仓库或源目录解析到真实路径时，不能证明源目录仍在仓库内，
+            // 按“不在仓库内”处理并停止创建（fail closed）。
+            insideRepository = false;
+          }
+        }
         const validSkill =
           insideRepository &&
           (previousIds.has(skillId) ||
@@ -352,31 +311,6 @@ function createScanner({ normalizeCachedSkills }) {
     });
 
     return { skills, issues: uniqueIssues(issues), complete };
-  }
-
-  /**
-   * 判断目录是否为有效 Skill 目录（存在 SKILL.md 且能解析出 name）。
-   * 用于审计 Agent 目录中「非本应用创建」的链接是否值得保留提示。
-   *
-   * @param {string} directory - 待检查目录
-   * @returns {boolean} 是否为有效 Skill 目录
-   */
-  async function hasValidSkillFile(directory) {
-    try {
-      const files = await withReadTimeout(
-        fsp.readdir(directory, { withFileTypes: true }),
-        `检查 Skill 目录 ${directory}`,
-      );
-      const entry = files.find(
-        (item) => item.isFile() && item.name.toLowerCase() === "skill.md",
-      );
-      return Boolean(
-        entry &&
-          (await readSkillNameDetailed(path.join(directory, entry.name))).name,
-      );
-    } catch (_) {
-      return false;
-    }
   }
 
   return {

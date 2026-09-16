@@ -45,7 +45,10 @@ export function createNoticeCenter() {
     notices.value.push({ id, message: normalizedMessage, type });
     const timeout =
       type === "error" ? Math.max(duration, ERROR_NOTICE_DURATION) : duration;
-    timers.set(id, setTimeout(() => dismissNotice(id), timeout));
+    timers.set(
+      id,
+      setTimeout(() => dismissNotice(id), timeout),
+    );
   }
 
   /** 批量展示预加载服务返回的问题。 */

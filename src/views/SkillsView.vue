@@ -1,6 +1,6 @@
 <script setup>
-import { Database, RefreshCw } from "@lucide/vue";
-import { ref, watch } from "vue";
+import { CircleAlert, Database, RefreshCw } from "@lucide/vue";
+import { computed, ref, watch } from "vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
 import PathPicker from "../components/PathPicker.vue";
@@ -8,6 +8,10 @@ import { useAppStore } from "../stores/appStore";
 
 const store = useAppStore();
 const directory = ref(store.repositoryPath);
+/** 输入框中的路径是否与已保存的仓库路径一致（不一致时不允许直接重新扫描）。 */
+const draftMatchesSaved = computed(
+  () => directory.value.trim() === (store.repositoryPath || ""),
+);
 
 watch(
   () => store.repositoryPath,
@@ -21,33 +25,39 @@ watch(
  * 注意：这里不落库、不扫描，用户仍需点击“扫描目录”才会生效。
  */
 async function browse() {
-  try {
-    const selected = await store.chooseDirectory(directory.value);
-    if (selected) directory.value = selected;
-  } catch (error) {
-    store.notify(error.message, "error");
-  }
+  const selected = await store.chooseDirectory(directory.value);
+  if (selected) directory.value = selected;
 }
 
 /**
  * 保存仓库目录并触发首次扫描。
- * 失败信息已由 store.setRepository 内部统一提示，这里仅吞掉异常避免重复报错。
+ * 失败信息已由 store 统一提示，这里只负责发起调用。
  */
 async function scan() {
   if (!directory.value.trim())
     return store.notify("请先填写 Skills 仓库目录", "error");
-  try {
-    await store.setRepository(directory.value);
-  } catch (_) {}
+  await store.setRepository(directory.value);
+}
+
+/** 按已保存的仓库路径重新扫描（用于仓库内容变动后手动刷新）。 */
+async function refresh() {
+  await store.refreshSkills();
 }
 
 /**
- * 按已保存的仓库路径重新扫描（用于仓库内容变动后手动刷新）。
+ * 确认仓库确实已清空：按空仓库收敛一次，清理失效的分组引用、启用记录与受管链接。
+ * 属于破坏性操作，因此需要用户显式确认；统一仓库中的文件不会被删除。
  */
-async function refresh() {
-  try {
-    await store.refreshSkills();
-  } catch (_) {}
+async function confirmEmptyRepository() {
+  const accepted = await store.confirm({
+    title: "确认仓库已清空",
+    message:
+      "将按“仓库中已没有任何 Skill”处理：失效的分组引用、Agent 启用记录和本应用创建的链接会被清理。统一 Skills 仓库中的文件不会被删除。",
+    confirmText: "确认清理",
+    tone: "danger",
+  });
+  if (!accepted) return;
+  await store.refreshSkills({ allowEmptyRepository: true });
 }
 </script>
 
@@ -93,8 +103,13 @@ async function refresh() {
         <button
           class="grid size-10 shrink-0 place-items-center rounded-md border border-border-strong bg-surface text-ink-secondary hover:border-primary-border hover:bg-primary-soft hover:text-primary disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
-          title="重新扫描"
-          :disabled="store.busy || !store.repositoryPath"
+          aria-label="重新扫描"
+          :title="
+            draftMatchesSaved
+              ? '按已保存的仓库目录重新扫描'
+              : '输入框中的路径尚未保存，请先保存后再刷新'
+          "
+          :disabled="store.busy || !store.repositoryPath || !draftMatchesSaved"
           @click="refresh"
         >
           <RefreshCw :size="18" :stroke-width="1.8" />
@@ -103,6 +118,27 @@ async function refresh() {
       <p class="mt-2 mb-0 text-xs text-ink-muted">
         会递归查找包含 SKILL.md 的目录；这里只读取文件，不会修改仓库内容。
       </p>
+    </div>
+
+    <div
+      v-if="store.emptyRepository"
+      class="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-warning bg-warning-soft px-4 py-3 text-sm text-warning"
+      role="status"
+    >
+      <CircleAlert class="shrink-0" :size="18" />
+      <p class="m-0 min-w-0 flex-1 leading-6">
+        仓库本次未检测到任何
+        Skill。若确认仓库已清空，可以清理失效的分组引用、Agent
+        启用记录与本应用创建的链接；仓库文件不会被删除。
+      </p>
+      <button
+        class="inline-flex h-9 items-center justify-center rounded-md border border-warning bg-surface px-3 font-semibold whitespace-nowrap text-warning hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
+        type="button"
+        :disabled="store.busy"
+        @click="confirmEmptyRepository"
+      >
+        确认仓库已清空
+      </button>
     </div>
 
     <div
