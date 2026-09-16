@@ -31,30 +31,38 @@ const DEFAULT_SKILLS = [
 ];
 
 /**
+ * 删除单个条目：符号链接 / junction 只删除链接本身（绝不跟随目标），
+ * 普通目录递归删除，普通文件直接删除。
+ *
+ * @param {string} target - 待删除的条目路径
+ */
+function removeEntry(target) {
+  const stat = fs.lstatSync(target);
+  if (stat.isSymbolicLink()) {
+    try {
+      fs.unlinkSync(target);
+    } catch (_) {
+      // Windows 下目录链接（junction）需要 rmdir 删除
+      fs.rmdirSync(target);
+    }
+    return;
+  }
+  if (stat.isDirectory()) removeDirectoryTree(target);
+  else fs.unlinkSync(target);
+}
+
+/**
  * 可靠地递归删除目录树（手动实现，不使用 fs.rmSync）。
  *
  * 说明：在部分 Node 版本/Windows 组合下，`fs.rmSync(dir, { recursive: true, force: true })`
- * 对空目录可能静默失败（返回成功但目录仍在），因此测试环境统一使用本实现：
- * 符号链接 / junction 只删除链接本身，绝不跟随目标。
+ * 对空目录可能静默失败（返回成功但目录仍在），因此测试环境统一使用本实现。
  *
  * @param {string} directory - 待删除的目录
  */
 function removeDirectoryTree(directory) {
   if (!fs.existsSync(directory)) return;
-  for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-    const target = path.join(directory, entry.name);
-    const stat = fs.lstatSync(target);
-    if (stat.isSymbolicLink()) {
-      try {
-        fs.unlinkSync(target);
-      } catch (_) {
-        fs.rmdirSync(target);
-      }
-      continue;
-    }
-    if (stat.isDirectory()) removeDirectoryTree(target);
-    else fs.unlinkSync(target);
-  }
+  for (const name of fs.readdirSync(directory))
+    removeEntry(path.join(directory, name));
   fs.rmdirSync(directory);
 }
 
@@ -66,21 +74,8 @@ function removeDirectoryTree(directory) {
  */
 function clearDirectory(directory) {
   fs.mkdirSync(directory, { recursive: true });
-  for (const name of fs.readdirSync(directory)) {
-    const target = path.join(directory, name);
-    const stat = fs.lstatSync(target);
-    if (stat.isSymbolicLink()) {
-      try {
-        fs.unlinkSync(target);
-      } catch (_) {
-        // Windows 下目录链接（junction）需要 rmdir 删除
-        fs.rmdirSync(target);
-      }
-      continue;
-    }
-    if (stat.isDirectory()) removeDirectoryTree(target);
-    else fs.unlinkSync(target);
-  }
+  for (const name of fs.readdirSync(directory))
+    removeEntry(path.join(directory, name));
 }
 
 /**
@@ -89,7 +84,6 @@ function clearDirectory(directory) {
  * @param {string} directory - Skill 目录
  * @param {string} name - SKILL.md 元数据中的 name
  * @param {{fileName?: string}} [options] - fileName 可指定 SKILL.md 的文件名大小写
- * @returns {string} 目录路径
  */
 function createSkill(directory, name, options = {}) {
   const fileName = options.fileName || "SKILL.md";
@@ -99,7 +93,6 @@ function createSkill(directory, name, options = {}) {
     `---\nname: ${name}\ndescription: 测试用 Skill\n---\n\n# ${name}\n`,
     "utf8",
   );
-  return directory;
 }
 
 /** 把 skills_repo 重置为默认 fixtures（alpha / beta / gamma）。 */
@@ -158,17 +151,6 @@ function listLinks(directory) {
     .readdirSync(directory)
     .filter((name) => fs.lstatSync(path.join(directory, name)).isSymbolicLink())
     .sort();
-}
-
-/**
- * 列出目录中的所有条目名（排序）。
- *
- * @param {string} directory - 目标目录
- * @returns {string[]} 条目名列表
- */
-function listEntries(directory) {
-  if (!fs.existsSync(directory)) return [];
-  return fs.readdirSync(directory).sort();
 }
 
 /**
@@ -248,17 +230,12 @@ function createHarness(name, options = {}) {
 
 module.exports = {
   AGENT_DIRS,
-  DEFAULT_SKILLS,
-  PRELOAD_DIR,
-  PROJECT_ROOT,
   REPO_DIR,
   TEST_DIR,
   captureError,
-  cleanTempArtifacts,
   clearDirectory,
   createHarness,
   createSkill,
-  listEntries,
   listLinks,
   removeDirectoryTree,
   renameWithRetry,

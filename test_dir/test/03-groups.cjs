@@ -12,7 +12,7 @@ const {
   listLinks,
   removeDirectoryTree,
 } = require("./helpers/harness.cjs");
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 const reporter = createReporter("03-groups");
 const AGENT1 = AGENT_DIRS[0];
@@ -197,7 +197,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);

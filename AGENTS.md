@@ -33,7 +33,7 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
   - 删除链接只针对「指向仓库内」或「已悬空」的符号链接；普通文件、目录、指向仓库外的链接一律不碰
   - 扫描不完整（`complete=false`）或空仓库防护（`emptyRepository`）触发时，不得执行任何清理
   - Agent 目录必须为空且创建后不可修改，只能删除重建
-- 路径比较必须用 `public/preload/utils.js` 的 `comparablePath` / `pathsEqualLexical` / `isInsideDirectoryLexical`，禁止裸字符串比较（Windows 大小写、`\\?\` 前缀、分隔符问题）
+- 路径比较必须用 `public/preload/utils.js` 的 `comparablePath` / `pathsEqualLexical` / `isInsideDirectoryLexical` / `pathsOverlapLexical`，禁止裸字符串比较（Windows 大小写、`\\?\` 前缀、分隔符问题）
 - Windows 上链接以 junction 创建；删除先 unlink，失败回退 rmdir
 
 ## 前端约定
@@ -42,7 +42,7 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 - 只用 `src/main.css` 中的 Tailwind 语义类（bg-canvas、text-ink、border-border 等），禁止硬编码色值；深色主题靠 `<html class="dark">` 开关；Tailwind v4 没有 tailwind.config.js / postcss.config.js
 - 页面布局统一为「顶部固定 + 内容区独立滚动」：视图根元素用 `h-full` + `overflow-hidden`，内部滚动区用 `min-h-0 flex-1 overflow-y-auto`；App.vue 的 main 是 `overflow-hidden`，不允许整页滚动
 - 滚动条已全局隐藏（`src/main.css` 的 `::-webkit-scrollbar { display: none }`），勿写 `overflow: hidden` 禁用滚动能力
-- 路由用 `createMemoryHistory`（uTools 从本地文件加载页面）
+- 路由用 `createMemoryHistory`（uTools 从本地文件加载页面）；顶部导航项由路由 meta 的 label / icon 派生（`src/router/index.js` 的 `navigationTabs`），勿在 App.vue 里另建一份 path 列表
 - skill 开关是「乐观更新 + 300ms 防抖 + 失败回滚」，preload 侧写操作全局串行；勿在开关路径上引入同步等待
 
 ## 验证方式

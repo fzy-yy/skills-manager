@@ -7,7 +7,7 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const require = createRequire(import.meta.url);
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 /** 路径解析：本文件位于 test_dir/test/ 下。 */
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -192,7 +192,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);

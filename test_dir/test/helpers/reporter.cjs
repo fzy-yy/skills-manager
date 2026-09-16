@@ -64,4 +64,17 @@ function createReporter(moduleName) {
   return { check, finish, section, skip };
 }
 
-module.exports = { createReporter };
+/**
+ * 运行测试模块的主函数：捕获未处理异常并以失败状态退出。
+ * 各模块末尾统一调用，避免每处重复相同的尾部样板。
+ *
+ * @param {() => Promise<void>} main - 模块主函数
+ */
+function runModule(main) {
+  main().catch((error) => {
+    console.error("测试脚本异常：", error);
+    process.exit(1);
+  });
+}
+
+module.exports = { createReporter, runModule };

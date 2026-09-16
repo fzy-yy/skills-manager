@@ -16,7 +16,7 @@ const {
   removeDirectoryTree,
   renameWithRetry,
 } = require("./helpers/harness.cjs");
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 const reporter = createReporter("02-repository");
 const AGENT1 = AGENT_DIRS[0];
@@ -95,7 +95,8 @@ async function main() {
   reporter.check(
     "2.2.1",
     "显示名为元数据 name、id 与目录名一致",
-    state.skills.every((skill) => skill.id === skill.folderName) &&
+    state.skills.map((skill) => skill.id).sort().join(",") ===
+      "alpha,beta,gamma" &&
       state.skills.some((skill) => skill.name === "Alpha Skill"),
     JSON.stringify(state.skills),
   );
@@ -463,7 +464,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);

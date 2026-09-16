@@ -14,7 +14,7 @@ const {
   removeDirectoryTree,
   renameWithRetry,
 } = require("./helpers/harness.cjs");
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 const reporter = createReporter("05-applications");
 const [AGENT1, AGENT2] = AGENT_DIRS;
@@ -121,7 +121,6 @@ async function main() {
   const ghost = {
     id: "ghost",
     name: "Ghost",
-    folderName: "ghost",
     sourcePath: path.join(REPO_DIR, "ghost"),
   };
   const storedWithGhost = harness.readStoredState();
@@ -205,7 +204,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);

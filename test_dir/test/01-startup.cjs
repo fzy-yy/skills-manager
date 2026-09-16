@@ -3,7 +3,7 @@
  * 运行：node test_dir/test/01-startup.cjs
  */
 const { createHarness } = require("./helpers/harness.cjs");
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 const reporter = createReporter("01-startup");
 
@@ -72,7 +72,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);

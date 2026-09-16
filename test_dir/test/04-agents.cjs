@@ -14,7 +14,7 @@ const {
   removeDirectoryTree,
   renameWithRetry,
 } = require("./helpers/harness.cjs");
-const { createReporter } = require("./helpers/reporter.cjs");
+const { createReporter, runModule } = require("./helpers/reporter.cjs");
 
 const reporter = createReporter("04-agents");
 const [AGENT1, AGENT2, AGENT3] = AGENT_DIRS;
@@ -212,7 +212,4 @@ async function main() {
   reporter.finish();
 }
 
-main().catch((error) => {
-  console.error("测试脚本异常：", error);
-  process.exit(1);
-});
+runModule(main);
