@@ -11,6 +11,13 @@ node_modules
 dist
 *.local
 
+# 测试运行产物（测试脚本与 fixtures 本身需要提交）
+test_dir/.user-data/
+test_dir/agents1/
+test_dir/agents2/
+test_dir/agents3/
+test_dir/.tmp-*
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
