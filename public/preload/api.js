@@ -209,24 +209,19 @@ function createSkillsManagerApi({ utools }) {
   }
 
   /**
-   * 校验目标目录是空目录。
-   * 插件约定：Agent 目录中的 Skills 全部由本插件创建，因此绑定前必须为空，
-   * 避免目录中已有的内容被当作“插件管理的链接”参与后续同步。
+   * 校验目标目录可读（创建 Agent 前的探活）。
+   * 目录允许包含其他内容（插件只管理指向仓库的链接），这里仅确认目录项可列出，
+   * 让权限问题在创建阶段就暴露，而不是推迟到后续链接同步时才提示。
    *
    * @param {string} directory - 已规范化的目标目录
-   * @throws {Error} 目录中存在任何内容时抛出
+   * @throws {Error} 目录无法读取时抛出
    */
-  async function assertDirectoryEmpty(directory) {
-    let entries;
+  async function assertDirectoryReadable(directory) {
     try {
-      entries = await fs.promises.readdir(directory);
+      await fs.promises.readdir(directory);
     } catch (error) {
       throw new Error(`无法读取目录内容：${errorMessage(error)}`);
     }
-    if (entries.length)
-      throw new Error(
-        `该目录不是空目录（包含“${entries[0]}”等 ${entries.length} 项内容）。请选择或新建一个空文件夹，确保其中的 Skills 链接全部由本插件管理`,
-      );
   }
 
   /** 打开系统目录选择框；用户取消时返回空串。 */
@@ -387,7 +382,8 @@ function createSkillsManagerApi({ utools }) {
   }
 
   /**
-   * 新建 Agent：名称非空、目录为空、目录未被占用且与仓库不重叠。
+   * 新建 Agent：名称非空、目录存在且可读、目录未被占用且与仓库不重叠。
+   * 目录中允许已有其他内容：插件只管理指向仓库的链接，普通文件与外部链接一律不碰。
    * 名称重复时自动追加递增序号；创建后 Agent 信息不可修改（避免目录迁移带来的
    * 链接清理风险），如需调整请删除后重新创建。
    */
@@ -402,7 +398,7 @@ function createSkillsManagerApi({ utools }) {
       "Agent Skills 目录",
     );
     assertAgentDirectoryAvailable(state, directory);
-    await assertDirectoryEmpty(directory);
+    await assertDirectoryReadable(directory);
 
     // 名称重复时自动追加递增序号（如“Codex (2)”），保证 Agent 名称唯一。
     const usedNames = new Set(state.agents.map((agent) => agent.name));

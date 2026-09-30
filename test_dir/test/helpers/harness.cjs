@@ -95,6 +95,19 @@ function createSkill(directory, name, options = {}) {
   );
 }
 
+/**
+ * 创建一个已悬空的符号链接：先用真实目录建链接，再删除目标目录。
+ * 直接用不存在的目标建链接在部分平台不可靠，因此统一采用“先建后删”构造悬空状态。
+ *
+ * @param {string} linkPath - 链接路径
+ * @param {string} scratchTarget - 中转目标目录（函数内创建并删除）
+ */
+function createDanglingLink(linkPath, scratchTarget) {
+  fs.mkdirSync(scratchTarget, { recursive: true });
+  fs.symlinkSync(scratchTarget, linkPath, "junction");
+  removeDirectoryTree(scratchTarget);
+}
+
 /** 把 skills_repo 重置为默认 fixtures（alpha / beta / gamma）。 */
 function resetRepository() {
   removeDirectoryTree(REPO_DIR);
@@ -234,6 +247,7 @@ module.exports = {
   TEST_DIR,
   captureError,
   clearDirectory,
+  createDanglingLink,
   createHarness,
   createSkill,
   listLinks,

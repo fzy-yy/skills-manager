@@ -1,11 +1,11 @@
 /**
  * Agent Skills 链接管理：在 Agent 目录中创建 / 删除指向仓库的目录符号链接。
  *
- * 设计前提（与产品约定一致）：Agent 目录必须为空且其中的 Skills 链接全部由本插件管理，
- * 因此同步时以「磁盘现状 + 期望启用集合」为唯一依据，不依赖额外的受管记录：
+ * 设计前提（与产品约定一致）：Agent 目录允许包含其他内容，插件只管理「指向仓库」
+ * 的链接，因此同步时以「磁盘现状 + 期望启用集合」为唯一依据，不依赖额外的受管记录：
  *  - 期望状态：每个已启用 Skill 对应 <Agent 目录>/<Skill 目录名> 的一个符号链接；
- *  - 清理范围：目录第一层中「指向仓库内部」或「已失效（悬空）」的符号链接；
- *  - 保护范围：普通文件、普通目录以及指向仓库外部的链接一律不触碰。
+ *  - 清理范围：目录第一层中「目标位于仓库内」的符号链接（含路径在仓库内但已悬空的）；
+ *  - 保护范围：普通文件、普通目录以及指向仓库外部的链接（无论是否悬空）一律不触碰。
  */
 const fs = require("node:fs");
 const path = require("node:path");
@@ -75,18 +75,16 @@ async function removeSymlink(linkPath) {
 }
 
 /**
- * 判断一个符号链接是否由本插件管理。
+ * 判断一个符号链接是否由本插件管理：目标位于仓库内（含已悬空但路径仍在仓库内的）。
+ * 指向仓库外部的链接无法证明与本插件有关，即使已悬空也保留，避免误删用户内容。
  *
  * @param {object} inspected - inspectEntry 的结果（kind 必须为 symlink）
  * @param {string} repositoryPath - 统一 Skills 仓库目录
- * @returns {Promise<boolean>} true 表示可以清理
+ * @returns {boolean} true 表示可以清理
  */
-async function isManagedLink(inspected, repositoryPath) {
+function isManagedLink(inspected, repositoryPath) {
   if (inspected.kind !== "symlink") return false;
-  if (isInsideDirectoryLexical(repositoryPath, inspected.targetPath))
-    return true;
-  // 悬空链接：所指内容已不存在，删除它不会丢失任何文件。
-  return !(await pathExists(inspected.targetPath));
+  return isInsideDirectoryLexical(repositoryPath, inspected.targetPath);
 }
 
 /**
@@ -168,7 +166,7 @@ async function syncAgentLinks({
       keptPaths.add(comparablePath(entryPath));
       continue;
     }
-    if (skill || (await isManagedLink(inspected, repositoryPath))) {
+    if (skill || isManagedLink(inspected, repositoryPath)) {
       try {
         await removeSymlink(entryPath);
       } catch (error) {
@@ -245,15 +243,17 @@ async function syncAgentLinks({
 }
 
 /**
- * 清理 Agent 目录中由本插件管理的全部链接。
+ * 清理 Agent 目录中由本插件管理的链接（目标位于仓库内）。
  * 用于删除 Agent、更换目录与清除数据；失败的条目会提示用户但不阻断流程。
+ * 仓库路径为空时无法识别受管链接，此时不删除任何内容（目录中的链接一律保留）。
  *
  * @param {{id: string, name: string, directory: string}} agent - 目标 Agent
- * @param {{repositoryPath?: string}} [options] - 仓库路径（为空时按“目录仅由插件管理”清理全部链接）
+ * @param {{repositoryPath?: string}} [options] - 统一 Skills 仓库目录
  * @returns {Promise<{issues: Array}>} 清理过程中产生的问题
  */
 async function removeManagedLinks(agent, { repositoryPath = "" } = {}) {
   const issues = [];
+  if (!repositoryPath) return { issues };
   let entries;
   try {
     entries = await withTimeout(
@@ -277,8 +277,7 @@ async function removeManagedLinks(agent, { repositoryPath = "" } = {}) {
     const entryPath = path.join(agent.directory, entry.name);
     const inspected = await inspectEntry(entryPath);
     if (inspected.kind !== "symlink") continue;
-    const managed =
-      !repositoryPath || (await isManagedLink(inspected, repositoryPath));
+    const managed = isManagedLink(inspected, repositoryPath);
     if (!managed) continue;
     try {
       await removeSymlink(entryPath);

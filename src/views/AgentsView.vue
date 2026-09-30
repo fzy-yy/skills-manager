@@ -27,8 +27,8 @@ async function browse() {
 
 /**
  * 创建 Agent。
- * 服务端会校验：目录必须存在、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合，
- * 且必须为空目录——保证目录中的 Skills 链接全部由本插件管理。
+ * 服务端会校验：目录必须存在、可读、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合。
+ * 目录中允许已有其他内容：插件只管理指向仓库的链接，普通文件与外部链接不会被动。
  * 创建后不可修改（避免目录迁移带来的链接清理风险），如需调整请删除后重新创建。
  * 失败时表单内容原样保留，便于用户修正后重试。
  */
@@ -104,7 +104,7 @@ async function remove(agent) {
         ><PathPicker
           v-model="directory"
           input-id="agent-directory"
-          placeholder="选择一个空目录"
+          placeholder="选择或输入 Skills 目录"
           :disabled="store.busy"
           @browse="browse"
         />
@@ -120,8 +120,8 @@ async function remove(agent) {
         </button>
       </div>
       <p class="col-span-3 m-0 text-xs text-ink-muted max-[760px]:col-span-1">
-        Skills
-        目录必须为空目录：其中的链接全部由本插件创建与管理，插件不会修改目录中的其他内容。
+        目录可包含其他文件：插件只创建与管理指向本 Skills
+        仓库的链接（未启用的会被清理），目录中的其他内容一概不动。
       </p>
     </div>
 
@@ -178,7 +178,7 @@ async function remove(agent) {
         v-else
         :icon="Bot"
         title="还没有 Agent"
-        description="填写名称与空目录，保存后即可在应用配置中开启 Skills。"
+        description="填写名称与 Skills 目录，保存后即可在应用配置中开启 Skills。"
       />
     </div>
   </section>

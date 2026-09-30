@@ -9,6 +9,7 @@ const {
   REPO_DIR,
   TEST_DIR,
   captureError,
+  createDanglingLink,
   createHarness,
   listLinks,
   removeDirectoryTree,
@@ -187,6 +188,25 @@ async function main() {
     state.enabledSkills[agentId].length === 0,
     JSON.stringify(state.enabledSkills),
   );
+
+  // [5.20] 目标位置是已悬空的、指向仓库外的链接：保留并提示占用
+  createDanglingLink(
+    path.join(AGENT1, "beta"),
+    path.join(TEST_DIR, ".tmp-dangling-target"),
+  );
+  state = await api.setAgentSkills(agentId, ["beta"]);
+  reporter.check(
+    "5.20",
+    "悬空的外部链接被保留",
+    fs.lstatSync(path.join(AGENT1, "beta")).isSymbolicLink(),
+  );
+  reporter.check(
+    "5.20",
+    "提示目标位置已被其他链接占用",
+    state.issues.some((issue) => issue.message.includes("被其他链接占用")),
+    JSON.stringify(state.issues.map((issue) => issue.message)),
+  );
+  fs.unlinkSync(path.join(AGENT1, "beta"));
 
   // 前端交互与队列
   reporter.skip("5.1", "下拉选择与统计属前端行为，人工验证");

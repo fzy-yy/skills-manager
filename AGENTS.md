@@ -30,9 +30,10 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 - dist/ 是 uTools 实际加载的产物（已 gitignore）；本地配置在 `<uTools userData>/skills-manager/state.json`，不同步、不提交
 - 链接同步模型（改 scanner.js / links.js 前必读）：
   - 只扫描仓库**第一层子目录**中的 SKILL.md，不递归；Skill id 与链接文件名 = 子目录名，界面显示名 = SKILL.md 元数据 `name`
-  - 删除链接只针对「指向仓库内」或「已悬空」的符号链接；普通文件、目录、指向仓库外的链接一律不碰
+  - 删除链接只针对「目标位于仓库内」的符号链接（含路径在仓库内但已悬空的）；普通文件、目录、指向仓库外的链接（无论是否悬空）一律不碰
+  - 仓库路径为空时无法识别受管链接，`removeManagedLinks` 不得删除任何链接
   - 扫描不完整（`complete=false`）或空仓库防护（`emptyRepository`）触发时，不得执行任何清理
-  - Agent 目录必须为空且创建后不可修改，只能删除重建
+  - Agent 目录允许包含其他内容（插件只管理指向仓库的链接）；创建后不可修改，只能删除重建
 - 路径比较必须用 `public/preload/utils.js` 的 `comparablePath` / `pathsEqualLexical` / `isInsideDirectoryLexical` / `pathsOverlapLexical`，禁止裸字符串比较（Windows 大小写、`\\?\` 前缀、分隔符问题）
 - Windows 上链接以 junction 创建；删除先 unlink，失败回退 rmdir
 

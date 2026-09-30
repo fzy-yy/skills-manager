@@ -8,6 +8,7 @@ const {
   AGENT_DIRS,
   REPO_DIR,
   TEST_DIR,
+  createDanglingLink,
   createHarness,
   listLinks,
   removeDirectoryTree,
@@ -51,15 +52,22 @@ async function main() {
   );
   removeDirectoryTree(path.join(AGENT1, "alpha"));
 
-  // [7.3] 手动创建指向仓库外的链接：永不触碰
+  // [7.3] 手动创建指向仓库外的链接：永不触碰（含悬空）
   fs.symlinkSync(AGENT2, path.join(AGENT1, "outside-link"), "junction");
+  createDanglingLink(
+    path.join(AGENT1, "dangling-link"),
+    path.join(TEST_DIR, ".tmp-dangling-target"),
+  );
   state = await api.refresh();
   reporter.check(
     "7.3",
-    "指向仓库外的链接被保留",
-    fs.lstatSync(path.join(AGENT1, "outside-link")).isSymbolicLink(),
+    "指向仓库外的有效链接与悬空链接都被保留",
+    fs.lstatSync(path.join(AGENT1, "outside-link")).isSymbolicLink() &&
+      fs.lstatSync(path.join(AGENT1, "dangling-link")).isSymbolicLink(),
+    JSON.stringify(listLinks(AGENT1)),
   );
   fs.unlinkSync(path.join(AGENT1, "outside-link"));
+  fs.unlinkSync(path.join(AGENT1, "dangling-link"));
 
   // [7.4] 手动创建指向仓库内未启用 Skill 的链接：视为残留并删除
   await api.setAgentSkills(agentId, []);
@@ -200,6 +208,22 @@ async function main() {
   );
   await renameWithRetry(movedRepo, REPO_DIR);
   await api.setRepository(REPO_DIR);
+
+  // [7.18] 仓库路径缺失时删除 Agent：无法识别受管链接，不删除任何链接
+  state = await api.setAgentSkills(agentId, ["alpha"]);
+  fs.symlinkSync(AGENT1, path.join(AGENT2, "user-link"), "junction");
+  const storedNoRepo = harness.readStoredState();
+  storedNoRepo.repositoryPath = "";
+  harness.writeStoredState(JSON.stringify(storedNoRepo));
+  state = await api.deleteAgent(agentId);
+  reporter.check(
+    "7.18",
+    "仓库路径缺失时不删除目录中的任何链接",
+    listLinks(AGENT2).join(",") === "alpha,user-link",
+    JSON.stringify(listLinks(AGENT2)),
+  );
+  fs.unlinkSync(path.join(AGENT2, "alpha"));
+  fs.unlinkSync(path.join(AGENT2, "user-link"));
 
   // 需要特殊环境或人工验证的场景
   reporter.skip("7.13", "需要可拔插磁盘环境，人工验证");

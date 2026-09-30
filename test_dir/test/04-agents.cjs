@@ -9,6 +9,7 @@ const {
   REPO_DIR,
   TEST_DIR,
   captureError,
+  createDanglingLink,
   createHarness,
   listLinks,
   removeDirectoryTree,
@@ -39,18 +40,28 @@ async function main() {
   );
   reporter.check("4.2", "超长名称被拒绝", Boolean(error?.message.includes("不能超过")), error?.message);
 
-  // [4.3] 目录非空
+  // [4.3] 目录含其他文件：允许创建，已有文件与目录保持不动
   fs.writeFileSync(path.join(AGENT1, "existing.txt"), "占位", "utf8");
-  error = await captureError(() =>
-    api.createAgent({ name: "非空目录", directory: AGENT1 }),
-  );
+  fs.mkdirSync(path.join(AGENT1, "existing-folder"));
+  state = await api.createAgent({ name: "非空目录", directory: AGENT1 });
   reporter.check(
     "4.3",
-    "非空目录被拒绝并提示",
-    Boolean(error?.message.includes("不是空目录") && error?.message.includes("existing.txt")),
-    error?.message,
+    "含其他内容的目录可以创建 Agent",
+    state.agents.length === 1,
+    JSON.stringify(state.agents),
   );
+  state = await api.refresh();
+  reporter.check(
+    "4.3",
+    "刷新同步后已有文件与目录保持不动",
+    fs.existsSync(path.join(AGENT1, "existing.txt")) &&
+      fs.existsSync(path.join(AGENT1, "existing-folder")) &&
+      !state.issues.some((issue) => issue.type === "error"),
+    JSON.stringify(state.issues.map((issue) => issue.message)),
+  );
+  await api.deleteAgent(state.agents[0].id);
   fs.unlinkSync(path.join(AGENT1, "existing.txt"));
+  fs.rmdirSync(path.join(AGENT1, "existing-folder"));
 
   // [4.8] 正常创建
   state = await api.createAgent({ name: "Agent One", directory: AGENT1 });
@@ -131,15 +142,25 @@ async function main() {
     state.enabledSkills[agentOne.id] === undefined,
   );
 
-  // [4.13] 删除 Agent 时保留目录中的普通文件
+  // [4.13] 删除 Agent 时保留目录中的普通文件与指向仓库外的链接
   fs.writeFileSync(path.join(AGENT2, "keep-me.txt"), "保留内容", "utf8");
+  fs.symlinkSync(AGENT1, path.join(AGENT2, "outside-link"), "junction");
+  createDanglingLink(
+    path.join(AGENT2, "dangling-link"),
+    path.join(TEST_DIR, ".tmp-dangling-target"),
+  );
   state = await api.deleteAgent(agentTwo.id);
   reporter.check(
     "4.13",
-    "普通文件未被删除",
-    fs.existsSync(path.join(AGENT2, "keep-me.txt")),
+    "普通文件与外部链接（含悬空）未被删除",
+    fs.existsSync(path.join(AGENT2, "keep-me.txt")) &&
+      fs.lstatSync(path.join(AGENT2, "outside-link")).isSymbolicLink() &&
+      fs.lstatSync(path.join(AGENT2, "dangling-link")).isSymbolicLink(),
+    JSON.stringify(listLinks(AGENT2)),
   );
   fs.unlinkSync(path.join(AGENT2, "keep-me.txt"));
+  fs.unlinkSync(path.join(AGENT2, "outside-link"));
+  fs.unlinkSync(path.join(AGENT2, "dangling-link"));
 
   // [4.11] Agent 目录已被删除时仍可删除 Agent
   state = await api.createAgent({ name: "临时 Agent", directory: AGENT3 });
@@ -200,6 +221,46 @@ async function main() {
   );
   await renameWithRetry(movedForOpen, AGENT3);
   await api.deleteAgent(folderAgent.id);
+
+  reporter.section("绑定前已有内容的收敛语义");
+  // [4.19] 绑定前已有指向仓库的链接：未启用被清理、启用后保留复用
+  fs.symlinkSync(path.join(REPO_DIR, "beta"), path.join(AGENT3, "beta"), "junction");
+  state = await api.createAgent({ name: "接管链接", directory: AGENT3 });
+  const takeoverAgent = state.agents.find((agent) => agent.name === "接管链接");
+  state = await api.refresh();
+  reporter.check(
+    "4.19",
+    "绑定前已有、未启用的仓库内链接被清理",
+    !listLinks(AGENT3).includes("beta"),
+    JSON.stringify(listLinks(AGENT3)),
+  );
+  fs.symlinkSync(path.join(REPO_DIR, "beta"), path.join(AGENT3, "beta"), "junction");
+  state = await api.setAgentSkills(takeoverAgent.id, ["beta"]);
+  state = await api.refresh();
+  reporter.check(
+    "4.19",
+    "绑定前已有的同名同源链接在启用后被保留复用",
+    listLinks(AGENT3).join(",") === "beta",
+    JSON.stringify(listLinks(AGENT3)),
+  );
+
+  // [4.20] 绑定前已有指向仓库外的链接（有效 / 悬空）：一律保留
+  fs.symlinkSync(AGENT2, path.join(AGENT3, "outside-link"), "junction");
+  createDanglingLink(
+    path.join(AGENT3, "dangling-link"),
+    path.join(TEST_DIR, ".tmp-dangling-target"),
+  );
+  state = await api.refresh();
+  reporter.check(
+    "4.20",
+    "指向仓库外的有效链接与悬空链接都被保留",
+    fs.lstatSync(path.join(AGENT3, "outside-link")).isSymbolicLink() &&
+      fs.lstatSync(path.join(AGENT3, "dangling-link")).isSymbolicLink(),
+    JSON.stringify(listLinks(AGENT3)),
+  );
+  fs.unlinkSync(path.join(AGENT3, "outside-link"));
+  fs.unlinkSync(path.join(AGENT3, "dangling-link"));
+  await api.deleteAgent(takeoverAgent.id);
 
   // [4.12] 单个链接删除失败：需要构造权限错误，代码走查
   reporter.skip("4.12", "需要构造删除权限错误，代码走查");
