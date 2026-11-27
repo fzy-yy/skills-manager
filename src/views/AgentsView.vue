@@ -1,14 +1,18 @@
 <script setup>
 import { Bot, FolderOpen, Info, Trash2 } from "@lucide/vue";
 import { ref } from "vue";
+import AgentConfigDialog from "../components/AgentConfigDialog.vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
 import PathPicker from "../components/PathPicker.vue";
+import SyncModeBadge from "../components/SyncModeBadge.vue";
 import { useAppStore } from "../stores/appStore";
 
 const store = useAppStore();
 const name = ref("");
 const directory = ref("");
+/** 是否打开新增 Agent 的「额外配置」对话框。 */
+const configDialogOpen = ref(false);
 
 /** 清空表单，供新增成功后复用。 */
 function reset() {
@@ -26,19 +30,29 @@ async function browse() {
 }
 
 /**
- * 创建 Agent。
- * 服务端会校验：目录必须存在、可读、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合。
- * 目录中允许已有其他内容：插件只管理指向仓库的链接，普通文件与外部链接不会被动。
- * 创建后不可修改（避免目录迁移带来的链接清理风险），如需调整请删除后重新创建。
- * 失败时表单内容原样保留，便于用户修正后重试。
+ * 点击「添加 Agent」按钮：基础非空校验通过后弹出额外配置对话框，
+ * 由用户单选「链接形式」或「直接复制」后再提交创建。
  */
-async function save() {
+function openCreateDialog() {
   if (!name.value.trim() || !directory.value.trim())
     return store.notify("请完整填写 Agent 名称和 Skills 目录", "error");
+  configDialogOpen.value = true;
+}
+
+/**
+ * 确认额外配置后创建 Agent。
+ * 服务端会校验：目录必须存在、可读、不能是磁盘根目录、不能与仓库或已有 Agent 目录重合。
+ * 创建后名称、目录与配置方式均不可修改；失败时关闭弹窗并保留表单内容，便于修正后重试。
+ *
+ * @param {'symlink'|'copy'} syncMode - 选中的 Skills 配置方式
+ */
+async function confirmCreate(syncMode) {
   const saved = await store.createAgent({
     name: name.value,
     directory: directory.value,
+    syncMode,
   });
+  configDialogOpen.value = false;
   if (saved) reset();
 }
 
@@ -53,14 +67,17 @@ function openFolder(agent) {
 }
 
 /**
- * 删除 Agent：确认后删除配置，并清理本应用在其目录创建的链接。
+ * 删除 Agent：确认后删除配置，并按该 Agent 的配置方式安全清理受管链接或副本。
  *
- * @param {{id: string, name: string}} agent - 被删除的 Agent
+ * @param {{id: string, name: string, syncMode?: string}} agent - 被删除的 Agent
  */
 async function remove(agent) {
+  const isCopy = agent.syncMode === "copy";
   const accepted = await store.confirm({
     title: "删除 Agent",
-    message: `确定删除“${agent.name}”吗？本应用在其目录创建的链接也会被安全移除；如需重新使用，请重新创建 Agent。`,
+    message: isCopy
+      ? `确定删除“${agent.name}”吗？本应用复制到其目录中且校验与原 Skill 一致的副本会被安全移除（已修改或其他内容会保留）；如需重新使用，请重新创建 Agent。`
+      : `确定删除“${agent.name}”吗？本应用在其目录创建的链接也会被安全移除；如需重新使用，请重新创建 Agent。`,
     confirmText: "删除",
     tone: "danger",
   });
@@ -114,14 +131,13 @@ async function remove(agent) {
           class="inline-flex h-10 items-center justify-center rounded-md border border-primary bg-primary px-4 font-semibold whitespace-nowrap text-on-primary hover:bg-primary-hover disabled:cursor-not-allowed disabled:opacity-50"
           type="button"
           :disabled="store.busy || !name.trim() || !directory.trim()"
-          @click="save"
+          @click="openCreateDialog"
         >
           添加 Agent
         </button>
       </div>
       <p class="col-span-3 m-0 text-xs text-ink-muted max-[760px]:col-span-1">
-        目录可包含其他文件：插件只创建与管理指向本 Skills
-        仓库的链接（未启用的会被清理），目录中的其他内容一概不动。
+        目录可包含其他文件：点击“添加 Agent”后可选择「链接形式」或「直接复制」，插件只管理自身创建的受管内容，其他文件一概不动。
       </p>
     </div>
 
@@ -132,7 +148,7 @@ async function remove(agent) {
       <Info class="mt-0.5 shrink-0" :size="17" />
       <p class="m-0 leading-6">
         Agent
-        创建后不可修改名称与目录，避免迁移链接造成意外。如需调整，请删除后重新创建。
+        创建后不可修改名称、目录与配置方式，避免迁移或清理造成意外。如需调整，请删除后重新创建。
       </p>
     </div>
 
@@ -149,8 +165,11 @@ async function remove(agent) {
             ><Bot :size="21" :stroke-width="1.8"
           /></span>
           <div class="flex min-w-0 flex-1 flex-col gap-1">
-            <strong class="truncate">{{ agent.name }}</strong
-            ><span class="truncate font-mono text-xs text-ink-muted">{{
+            <div class="flex min-w-0 items-center gap-2">
+              <strong class="truncate">{{ agent.name }}</strong>
+              <SyncModeBadge :mode="agent.syncMode" />
+            </div>
+            <span class="truncate font-mono text-xs text-ink-muted">{{
               agent.directory || "当前设备尚未配置目录"
             }}</span>
           </div>
@@ -181,5 +200,14 @@ async function remove(agent) {
         description="填写名称与 Skills 目录，保存后即可在应用配置中开启 Skills。"
       />
     </div>
+
+    <AgentConfigDialog
+      :open="configDialogOpen"
+      :agent-name="name.trim()"
+      :agent-directory="directory.trim()"
+      :disabled="store.busy"
+      @cancel="configDialogOpen = false"
+      @confirm="confirmCreate"
+    />
   </section>
 </template>

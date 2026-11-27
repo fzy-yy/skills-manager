@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import BaseSelect from "../components/BaseSelect.vue";
 import EmptyState from "../components/EmptyState.vue";
 import PageHeader from "../components/PageHeader.vue";
+import SyncModeBadge from "../components/SyncModeBadge.vue";
 import ToggleRow from "../components/ToggleRow.vue";
 import { useAppStore } from "../stores/appStore";
 
@@ -112,12 +113,15 @@ function setSkill(skillId, enabled) {
             >个 Skills 已开启</span
           >
         </div>
-        <p
+        <div
           v-if="selectedAgent"
-          class="col-span-2 m-0 truncate pl-6.5 font-mono text-xs text-ink-muted max-[760px]:col-span-1"
+          class="col-span-2 flex min-w-0 items-center gap-2 pl-6.5 max-[760px]:col-span-1"
         >
-          {{ selectedAgent.directory || "当前设备尚未配置 Skills 目录" }}
-        </p>
+          <SyncModeBadge :mode="selectedAgent.syncMode" />
+          <p class="m-0 min-w-0 flex-1 truncate font-mono text-xs text-ink-muted">
+            {{ selectedAgent.directory || "当前设备尚未配置 Skills 目录" }}
+          </p>
+        </div>
       </div>
 
       <div
@@ -132,7 +136,11 @@ function setSkill(skillId, enabled) {
       >
         <CircleAlert class="mt-0.5 shrink-0" :size="17" />
         <div class="min-w-0">
-          <strong class="block font-bold">链接同步存在问题</strong>
+          <strong class="block font-bold">{{
+            selectedAgent?.syncMode === "copy"
+              ? "Skills 同步存在问题"
+              : "链接同步存在问题"
+          }}</strong>
           <p
             v-for="issue in syncIssues.slice(0, 3)"
             :key="`${issue.type}:${issue.message}`"

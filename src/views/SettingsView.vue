@@ -31,7 +31,7 @@ async function clearData() {
   const accepted = await store.confirm({
     title: "清除本地数据",
     message:
-      "这会清除 Skills 仓库路径、所有分组、Agent 配置、主题设置及本应用创建的链接。统一 Skills 仓库中的源文件不会被删除。",
+      "这会清除 Skills 仓库路径、所有分组、Agent 配置、主题设置及本应用创建的链接或受管副本。统一 Skills 仓库中的源文件不会被删除。",
     confirmText: "清除数据",
     tone: "danger",
   });
@@ -99,7 +99,7 @@ async function clearData() {
             <h2 class="m-0 text-base font-semibold text-ink">数据管理</h2>
             <p class="mt-1 mb-0 text-xs leading-5 text-ink-muted">
               清除当前设备上 uTools 数据目录中的插件配置，并移除本应用创建的 Agent
-              Skills 链接；数据不会在设备间同步。
+              Skills 链接或受管副本；数据不会在设备间同步。
             </p>
           </div>
           <button

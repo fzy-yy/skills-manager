@@ -12,8 +12,10 @@ const {
   MAX_ENTITY_NAME_LENGTH,
   createConfigStore,
   createDefaultState,
+  normalizeSyncMode,
   uniqueEntityName,
 } = require("./config");
+const { removeManagedCopies, syncAgentCopies } = require("./copies");
 const { removeManagedLinks, syncAgentLinks } = require("./links");
 const { scanRepository } = require("./scanner");
 const {
@@ -75,6 +77,7 @@ function createSkillsManagerApi({ utools }) {
         id: agent.id,
         name: agent.name,
         directory: agent.directory,
+        syncMode: normalizeSyncMode(agent.syncMode),
       })),
       enabledSkills: state.enabledSkills,
       theme: state.theme,
@@ -87,7 +90,69 @@ function createSkillsManagerApi({ utools }) {
   }
 
   /**
-   * 扫描仓库并同步所有 Agent 的链接（设置仓库与手动刷新共用）。
+   * 按 Agent 的配置方式分发同步逻辑（链接形式 / 直接复制）。
+   * 直接复制模式下会更新 state.enabledSkills（冲突或失败时单 Skill 回退）与 state.copiedSkills。
+   *
+   * @param {object} state - 当前配置
+   * @param {object} agent - 目标 Agent
+   * @param {Array} skills - 当前可用 Skills
+   * @param {{previousEnabledSkillIds?: string[], updateExisting?: boolean}} [options]
+   * @returns {Promise<{issues: Array}>}
+   */
+  async function syncAgent(
+    state,
+    agent,
+    skills,
+    { previousEnabledSkillIds, updateExisting = false } = {},
+  ) {
+    if (agent.syncMode === "copy") {
+      const result = await syncAgentCopies({
+        skills,
+        agent,
+        enabledSkillIds: state.enabledSkills[agent.id] || [],
+        previousEnabledSkillIds:
+          previousEnabledSkillIds ?? state.enabledSkills[agent.id] ?? [],
+        copiedSkills: state.copiedSkills[agent.id] || {},
+        updateExisting,
+      });
+      state.enabledSkills[agent.id] = result.enabledSkillIds;
+      state.copiedSkills[agent.id] = result.copiedSkills;
+      return { issues: result.issues };
+    }
+    return syncAgentLinks({
+      repositoryPath: state.repositoryPath,
+      skills,
+      agent,
+      enabledSkillIds: state.enabledSkills[agent.id] || [],
+    });
+  }
+
+  /**
+   * 按 Agent 的配置方式清理受管内容（删除 Agent、切换仓库、清除数据共用）。
+   *
+   * @param {object} state - 当前配置
+   * @param {object} agent - 目标 Agent
+   * @param {{repositoryPath?: string, skills?: Array}} [options]
+   * @returns {Promise<{issues: Array}>}
+   */
+  async function removeAgentManaged(
+    state,
+    agent,
+    { repositoryPath = "", skills = [] } = {},
+  ) {
+    if (agent.syncMode === "copy") {
+      const removal = await removeManagedCopies(agent, {
+        skills,
+        copiedSkills: state.copiedSkills[agent.id] || {},
+      });
+      state.copiedSkills[agent.id] = removal.remainingCopiedSkills || {};
+      return removal;
+    }
+    return removeManagedLinks(agent, { repositoryPath });
+  }
+
+  /**
+   * 扫描仓库并同步所有 Agent 的链接或副本（设置仓库与手动刷新共用）。
    *
    * 流程：扫描 → 清理失效引用 → 保存配置 → 逐个 Agent 同步链接。
    * 扫描不完整或仓库疑似被清空时只返回提示，不执行任何链接清理。
@@ -114,14 +179,14 @@ function createSkillsManagerApi({ utools }) {
         createIssue(
           "info",
           state.cachedSkills.length
-            ? "本次扫描未完全成功（存在无法读取或无法解析的目录），Skills 列表显示的是上次成功扫描的结果；未对分组与链接执行任何清理。"
+            ? "本次扫描未完全成功（存在无法读取或无法解析的目录），Skills 列表显示的是上次成功扫描的结果；未对分组、链接与副本执行任何清理。"
             : "本次扫描未完全成功，未获取到可用的 Skill 列表；请根据上方错误提示修复后重新扫描。",
         ),
       );
       return buildState(state, { skills: state.cachedSkills, issues: allIssues });
     }
 
-    // 空仓库防护：缓存里原本有 Skills，本次却一个都没扫到，先不动任何链接。
+    // 空仓库防护：缓存里原本有 Skills，本次却一个都没扫到，先不动任何链接或副本。
     if (
       !allowEmptyRepository &&
       scan.skills.length === 0 &&
@@ -130,7 +195,7 @@ function createSkillsManagerApi({ utools }) {
       allIssues.push(
         createIssue(
           "error",
-          "仓库本次未检测到任何 Skill。为防止临时空目录导致误删，现有分组、选择和链接已保留；若确认仓库已清空，可点击页面上的“确认仓库已清空”清理失效记录。",
+          "仓库本次未检测到任何 Skill。为防止临时空目录导致误删，现有分组、选择及受管链接/副本已保留；若确认仓库已清空，可点击页面上的“确认仓库已清空”清理失效记录。",
         ),
       );
       return buildState(state, {
@@ -172,16 +237,16 @@ function createSkillsManagerApi({ utools }) {
     await config.write(state);
 
     const agentIssues = {};
+    let hasCopyAgent = false;
     for (const agent of state.agents) {
-      const result = await syncAgentLinks({
-        repositoryPath: state.repositoryPath,
-        skills: scan.skills,
-        agent,
-        enabledSkillIds: state.enabledSkills[agent.id] || [],
+      if (agent.syncMode === "copy") hasCopyAgent = true;
+      const result = await syncAgent(state, agent, scan.skills, {
+        updateExisting: true,
       });
       agentIssues[agent.id] = result.issues;
       allIssues.push(...result.issues);
     }
+    if (hasCopyAgent) await config.write(state);
     return buildState(state, {
       skills: scan.skills,
       issues: allIssues,
@@ -310,14 +375,15 @@ function createSkillsManagerApi({ utools }) {
         );
     }
 
-    // 仓库变更时先清理旧仓库在 Agent 目录中留下的链接，避免切换后残留。
+    // 仓库变更时先清理旧仓库在 Agent 目录中留下的受管链接 / 副本，避免切换后残留。
     if (
       state.repositoryPath &&
       !pathsEqualLexical(state.repositoryPath, normalized)
     ) {
       for (const agent of state.agents) {
-        const removal = await removeManagedLinks(agent, {
+        const removal = await removeAgentManaged(state, agent, {
           repositoryPath: state.repositoryPath,
+          skills: state.cachedSkills,
         });
         issues.push(...removal.issues);
       }
@@ -383,9 +449,9 @@ function createSkillsManagerApi({ utools }) {
 
   /**
    * 新建 Agent：名称非空、目录存在且可读、目录未被占用且与仓库不重叠。
-   * 目录中允许已有其他内容：插件只管理指向仓库的链接，普通文件与外部链接一律不碰。
-   * 名称重复时自动追加递增序号；创建后 Agent 信息不可修改（避免目录迁移带来的
-   * 链接清理风险），如需调整请删除后重新创建。
+   * 支持两种 Skills 配置方式：symlink（链接形式，默认）与 copy（直接复制）。
+   * 目录中允许已有其他内容；名称重复时自动追加递增序号；创建后 Agent 名称、
+   * 目录与配置方式均不可修改，如需调整请删除后重新创建。
    */
   async function createAgent(input) {
     const { state, issues } = await readState();
@@ -393,6 +459,14 @@ function createSkillsManagerApi({ utools }) {
     if (!name) throw new Error("请输入 Agent 名称");
     if (name.length > MAX_ENTITY_NAME_LENGTH)
       throw new Error(`Agent 名称不能超过 ${MAX_ENTITY_NAME_LENGTH} 个字符`);
+    if (
+      input?.syncMode !== undefined &&
+      input.syncMode !== "symlink" &&
+      input.syncMode !== "copy"
+    ) {
+      throw new Error("不支持的 Skills 配置方式，请选择“链接形式”或“直接复制”");
+    }
+    const syncMode = normalizeSyncMode(input?.syncMode);
     const directory = await normalizeDirectory(
       input?.directory,
       "Agent Skills 目录",
@@ -412,30 +486,33 @@ function createSkillsManagerApi({ utools }) {
       );
 
     const id = `agent-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    state.agents.push({ id, name: finalName, directory });
+    state.agents.push({ id, name: finalName, directory, syncMode });
     state.enabledSkills[id] = [];
+    if (syncMode === "copy") state.copiedSkills[id] = {};
     await config.write(state);
     return buildState(state, { issues });
   }
 
-  /** 删除 Agent：先清理其目录中由本插件创建的链接，再移除配置。 */
+  /** 删除 Agent：先清理其目录中由本插件管理的链接或副本，再移除配置。 */
   async function deleteAgent(agentId) {
     const { state, issues } = await readState();
     const agent = state.agents.find((item) => item.id === agentId);
     if (!agent) throw new Error("未找到要删除的 Agent，请刷新后重试");
-    const removal = await removeManagedLinks(agent, {
+    const removal = await removeAgentManaged(state, agent, {
       repositoryPath: state.repositoryPath,
+      skills: state.cachedSkills,
     });
     issues.push(...removal.issues);
     state.agents = state.agents.filter((item) => item.id !== agentId);
     delete state.enabledSkills[agentId];
+    delete state.copiedSkills[agentId];
     await config.write(state);
     return buildState(state, { issues });
   }
 
   /**
-   * 更新一个 Agent 的启用 Skills 并同步链接。
-   * 目标状态先写入配置，再让磁盘链接向其收敛；同步失败时提示用户重试。
+   * 更新一个 Agent 的启用 Skills 并同步链接或副本。
+   * 链接模式先写配置再收敛链接；直接复制模式先同步（允许同名冲突单 Skill 回退）再落盘。
    */
   async function setAgentSkills(agentId, skillIds) {
     const { state, issues } = await readState();
@@ -458,14 +535,19 @@ function createSkillsManagerApi({ utools }) {
         ),
       );
 
+    const previousEnabled = state.enabledSkills[agentId] || [];
     state.enabledSkills[agentId] = nextIds;
-    await config.write(state);
-    const result = await syncAgentLinks({
-      repositoryPath: state.repositoryPath,
-      skills: state.cachedSkills,
-      agent,
-      enabledSkillIds: nextIds,
-    });
+    let result;
+    if (agent.syncMode === "copy") {
+      result = await syncAgent(state, agent, state.cachedSkills, {
+        previousEnabledSkillIds: previousEnabled,
+        updateExisting: false,
+      });
+      await config.write(state);
+    } else {
+      await config.write(state);
+      result = await syncAgent(state, agent, state.cachedSkills);
+    }
     return buildState(state, {
       issues: [...issues, ...result.issues],
       agentIssues: { [agentId]: result.issues },
@@ -473,15 +555,16 @@ function createSkillsManagerApi({ utools }) {
   }
 
   /**
-   * 清除本地数据：清理所有 Agent 目录中的受管链接并删除本地配置文件。
+   * 清除本地数据：清理所有 Agent 目录中的受管链接或副本，并删除本地配置文件。
    * 统一仓库中的源文件不会被删除。
    */
   async function clearData() {
     const { state, issues: readIssues } = await readState();
     const issues = [...readIssues];
     for (const agent of state.agents) {
-      const removal = await removeManagedLinks(agent, {
+      const removal = await removeAgentManaged(state, agent, {
         repositoryPath: state.repositoryPath,
+        skills: state.cachedSkills,
       });
       issues.push(...removal.issues);
     }

@@ -23,9 +23,21 @@ function createDefaultState() {
     groups: [],
     agents: [],
     enabledSkills: {},
+    copiedSkills: {},
     cachedSkills: [],
     theme: "light",
   };
+}
+
+/**
+ * 规范化 Agent 的 Skills 同步方式：仅支持 symlink（链接形式）与 copy（直接复制），
+ * 历史配置缺少该字段或取值非法时回退为 symlink。
+ *
+ * @param {unknown} value - 原始同步方式
+ * @returns {'symlink'|'copy'} 规范化后的同步方式
+ */
+function normalizeSyncMode(value) {
+  return value === "copy" ? "copy" : "symlink";
 }
 
 /**
@@ -87,9 +99,10 @@ function normalizeGroup(item) {
 
 /**
  * 规范化一个 Agent；id / name / directory 任一缺失时返回 null。
+ * 历史配置缺少 syncMode 时默认为 symlink（链接形式）。
  *
  * @param {object} item - 磁盘上的 Agent
- * @returns {{id: string, name: string, directory: string}|null}
+ * @returns {{id: string, name: string, directory: string, syncMode: 'symlink'|'copy'}|null}
  */
 function normalizeAgent(item) {
   if (!isPlainObject(item)) return null;
@@ -98,7 +111,7 @@ function normalizeAgent(item) {
   const directory =
     typeof item.directory === "string" ? item.directory.trim() : "";
   if (!id || !name || !directory) return null;
-  return { id, name, directory };
+  return { id, name, directory, syncMode: normalizeSyncMode(item.syncMode) };
 }
 
 /**
@@ -189,6 +202,32 @@ function normalizeState(raw) {
       : [];
   }
 
+  const copiedSkills = {};
+  const rawCopied = isPlainObject(source.copiedSkills)
+    ? source.copiedSkills
+    : {};
+  for (const agent of agents.items) {
+    if (agent.syncMode !== "copy") continue;
+    const entries = rawCopied[agent.id];
+    const normalizedEntries = {};
+    if (isPlainObject(entries)) {
+      for (const [skillId, hash] of Object.entries(entries)) {
+        const id = typeof skillId === "string" ? skillId.trim() : "";
+        const digest = typeof hash === "string" ? hash.trim() : "";
+        if (
+          !id ||
+          !digest ||
+          id !== path.basename(id) ||
+          id === "." ||
+          id === ".."
+        )
+          continue;
+        normalizedEntries[id] = digest;
+      }
+    }
+    copiedSkills[agent.id] = normalizedEntries;
+  }
+
   const state = {
     repositoryPath:
       typeof source.repositoryPath === "string"
@@ -197,6 +236,7 @@ function normalizeState(raw) {
     groups: groups.items,
     agents: agents.items,
     enabledSkills,
+    copiedSkills,
     cachedSkills,
     theme: source.theme === "dark" ? "dark" : "light",
   };
@@ -286,12 +326,21 @@ function createConfigStore(utools) {
         id: agent.id,
         name: agent.name,
         directory: agent.directory,
+        syncMode: normalizeSyncMode(agent.syncMode),
       })),
       enabledSkills: Object.fromEntries(
         state.agents.map((agent) => [
           agent.id,
           [...new Set(state.enabledSkills[agent.id] || [])],
         ]),
+      ),
+      copiedSkills: Object.fromEntries(
+        state.agents
+          .filter((agent) => normalizeSyncMode(agent.syncMode) === "copy")
+          .map((agent) => [
+            agent.id,
+            { ...(state.copiedSkills?.[agent.id] || {}) },
+          ]),
       ),
       cachedSkills: state.cachedSkills,
       theme: state.theme === "dark" ? "dark" : "light",
@@ -334,5 +383,6 @@ module.exports = {
   MAX_ENTITY_NAME_LENGTH,
   createConfigStore,
   createDefaultState,
+  normalizeSyncMode,
   uniqueEntityName,
 };

@@ -57,11 +57,12 @@ export const useAppStore = defineStore("app", () => {
       enabledSkills.value = { ...enabledSkills.value, [agentId]: [...skillIds] };
     },
     submit: (agentId, skillIds) => backend().setAgentSkills(agentId, skillIds),
-    onIssues: (agentId, issues) => {
+    onIssues: (agentId, issues, allIssues) => {
       agentIssues.value = { ...agentIssues.value, [agentId]: issues };
+      reportIssues(allIssues?.length ? allIssues : issues);
     },
     onError: (error) =>
-      notify(error?.message || "链接同步失败，请重试", "error"),
+      notify(error?.message || "Skills 同步失败，请重试", "error"),
   });
 
   // ============ 四、状态合并 ============
@@ -81,6 +82,7 @@ export const useAppStore = defineStore("app", () => {
     agents.value = state.agents || [];
 
     const mergedSelections = { ...(state.enabledSkills || {}) };
+    queue.syncCommitted(mergedSelections);
     for (const [agentId, skillIds] of queue.pendingEntries())
       mergedSelections[agentId] = [...skillIds];
     enabledSkills.value = mergedSelections;
@@ -211,11 +213,13 @@ export const useAppStore = defineStore("app", () => {
 
   /** 删除 Agent，并取消其尚未提交的开关选择。 */
   async function deleteAgent(agentId) {
+    const target = agents.value.find((agent) => agent.id === agentId);
+    const successText =
+      target?.syncMode === "copy"
+        ? "Agent 已删除，受管副本已清理"
+        : "Agent 已删除，相关链接已清理";
     queue.cancel(agentId);
-    return run(
-      () => backend().deleteAgent(agentId),
-      "Agent 已删除，相关链接已清理",
-    );
+    return run(() => backend().deleteAgent(agentId), successText);
   }
 
   /**

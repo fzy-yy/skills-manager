@@ -67,7 +67,11 @@ export function createSkillQueue({
             result?.enabledSkills?.[agentId] ?? skillIds,
           );
           committed.set(agentId, serverIds);
-          onIssues(agentId, result?.agentIssues?.[agentId] || []);
+          onIssues(
+            agentId,
+            result?.agentIssues?.[agentId] || [],
+            result?.issues || [],
+          );
           // 提交期间用户又改了选择时不覆盖界面，交给下一轮提交。
           if (!pending.has(agentId)) applySelection(agentId, serverIds);
         } catch (error) {
@@ -117,6 +121,19 @@ export function createSkillQueue({
   }
 
   /**
+   * 外部状态同步（刷新 / 切换仓库 / 重新进入）后更新已确认基线，
+   * 防止后续提交异常时回滚到刷新前的过期选择。
+   *
+   * @param {Record<string, string[]>} [selections] - 服务端最新 enabledSkills 映射
+   */
+  function syncCommitted(selections = {}) {
+    committed.clear();
+    for (const [agentId, skillIds] of Object.entries(selections || {})) {
+      committed.set(agentId, normalizeSkillIds(skillIds));
+    }
+  }
+
+  /**
    * 返回仍在等待提交的乐观选择（供状态合并时保留界面上的最新值）。
    *
    * @returns {Array<[string, string[]]>} agentId 与选择列表的条目
@@ -125,5 +142,12 @@ export function createSkillQueue({
     return [...pending.entries()];
   }
 
-  return { cancel, cancelAll, flushNow, pendingEntries, setSkills };
+  return {
+    cancel,
+    cancelAll,
+    flushNow,
+    pendingEntries,
+    setSkills,
+    syncCommitted,
+  };
 }

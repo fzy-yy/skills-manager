@@ -24,10 +24,14 @@ export interface GroupRecord {
   skillIds: string[];
 }
 
+/** Agent 配置 Skills 的同步方式：符号链接或直接复制源文件。 */
+export type AgentSyncMode = "symlink" | "copy";
+
 export interface AgentRecord {
   id: string;
   name: string;
   directory: string;
+  syncMode: AgentSyncMode;
 }
 
 export interface IssueRecord {
@@ -68,10 +72,11 @@ export interface SkillsManagerApi {
     allowEmptyRepository?: boolean;
   }): Promise<SkillsManagerState>;
   saveGroups(groups: GroupRecord[]): Promise<SkillsManagerState>;
-  /** 新建 Agent；目录必须存在、可读且未被占用，创建后不可修改 */
+  /** 新建 Agent；目录必须存在、可读且未被占用，创建后名称、目录与配置方式均不可修改 */
   createAgent(input: {
     name: string;
     directory: string;
+    syncMode?: AgentSyncMode;
   }): Promise<SkillsManagerState>;
   deleteAgent(agentId: string): Promise<SkillsManagerState>;
   /** 更新一个 Agent 的启用 Skills 并同步链接 */

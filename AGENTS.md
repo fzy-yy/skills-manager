@@ -1,6 +1,6 @@
 # AGENTS.md
 
-uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent 目录中创建、删除指向统一 Skills 仓库的符号链接；绝不改动仓库中的 skill 源文件。
+uTools 插件「Skills 管理器」。核心职责只有两件事：按各 Agent 的配置方式（链接形式 / 直接复制），在 Agent 目录中创建与安全清理来自统一 Skills 仓库的符号链接或受管副本；绝不改动仓库中的 skill 源文件。
 
 **动手修改代码前，先阅读 uTools 开发者文档**（https://www.u-tools.cn/docs/developer/docs.html），熟悉插件机制与 API 后再开始。
 
@@ -19,7 +19,7 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 
 ## 代码结构（preload 与渲染层两层）
 
-- `public/preload/*.js` — uTools 的 Node/CommonJS 环境：services.js 入口 / api.js 编排 / config.js 配置 / scanner.js 扫描 / links.js 链接 / utils.js 工具
+- `public/preload/*.js` — uTools 的 Node/CommonJS 环境：services.js 入口 / api.js 编排 / config.js 配置 / scanner.js 扫描 / links.js 链接同步 / copies.js 直接复制同步 / utils.js 工具
 - `src/**` — Vue 3 + Pinia 渲染层（ESM）：stores/appStore.js 主状态，stores/skill-queue.js 开关防抖队列，api/backend.js 是访问 preload 的唯一入口
 - 两层的契约是 `window.skillsManager` 返回的状态对象；改返回结构要同步三处：`public/preload/api.js` 的 `buildState`、`src/types/skills-manager.d.ts`、`src/stores/appStore.js` 的 `applyState`
 
@@ -28,12 +28,16 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 - `public/preload/package.json` 必须保持 `{"type":"commonjs"}`——根 package.json 是 `"type":"module"`，删掉它 uTools 将无法加载 preload
 - `pnpm-workspace.yaml` 的 `allowBuilds` 放行 esbuild 构建脚本，勿删，否则 vite 无法运行
 - dist/ 是 uTools 实际加载的产物（已 gitignore）；本地配置在 `<uTools userData>/skills-manager/state.json`，不同步、不提交
-- 链接同步模型（改 scanner.js / links.js 前必读）：
-  - 只扫描仓库**第一层子目录**中的 SKILL.md，不递归；Skill id 与链接文件名 = 子目录名，界面显示名 = SKILL.md 元数据 `name`
-  - 删除链接只针对「目标位于仓库内」的符号链接（含路径在仓库内但已悬空的）；普通文件、目录、指向仓库外的链接（无论是否悬空）一律不碰
-  - 仓库路径为空时无法识别受管链接，`removeManagedLinks` 不得删除任何链接
-  - 扫描不完整（`complete=false`）或空仓库防护（`emptyRepository`）触发时，不得执行任何清理
-  - Agent 目录允许包含其他内容（插件只管理指向仓库的链接）；创建后不可修改，只能删除重建
+- 同步与安全模型（改 scanner.js / links.js / copies.js 前必读）：
+  - 只扫描仓库**第一层子目录**中的 SKILL.md，不递归；Skill id 与目标目录名 = 子目录名，界面显示名 = SKILL.md 元数据 `name`
+  - **链接形式（`syncMode: "symlink"`，默认）**：删除只针对「目标位于仓库内」的符号链接（含路径在仓库内但已悬空的）；普通文件、目录、指向仓库外的链接（无论是否悬空）一律不碰；仓库路径为空时 `removeManagedLinks` 不得删除任何链接
+  - **直接复制（`syncMode: "copy"`）**：
+    - 仅管理 `state.json` 的 `copiedSkills` 中记录的受管副本（SHA-256 目录树指纹）；未记录的目录即使同名同内容也绝不自动删除
+    - 启用时目标位置已有同名目录 / 文件 / 链接一律不覆盖，按单 Skill 粒度回退启用状态并提示
+    - 删除或刷新覆盖更新前，必须校验目标为真实目录、顶层含常规文件 `SKILL.md`（大小写不敏感）、目录内无符号链接，且目录树指纹匹配复制快照或当前源 Skill（自动忽略 `Thumbs.db` / `desktop.ini` / `.DS_Store`）；校验不通过时保留磁盘内容并停止托管
+    - 复制采用同目录暂存 + 原子重命名；刷新更新未改副本采用备份交换，避免“旧删新无”丢失窗口；Windows 删除含只读文件的受管副本时先 `chmod` 再重试
+  - 扫描不完整（`complete=false`）或空仓库防护（`emptyRepository`）触发时，不得执行任何清理或覆盖
+  - Agent 目录允许包含其他内容；Agent 创建后名称、目录与配置方式（`syncMode`）均不可修改，只能删除重建
 - 路径比较必须用 `public/preload/utils.js` 的 `comparablePath` / `pathsEqualLexical` / `isInsideDirectoryLexical` / `pathsOverlapLexical`，禁止裸字符串比较（Windows 大小写、`\\?\` 前缀、分隔符问题）
 - Windows 上链接以 junction 创建；删除先 unlink，失败回退 rmdir
 
@@ -44,7 +48,7 @@ uTools 插件「Skills 管理器」。核心职责只有两件事：在 Agent �
 - 页面布局统一为「顶部固定 + 内容区独立滚动」：视图根元素用 `h-full` + `overflow-hidden`，内部滚动区用 `min-h-0 flex-1 overflow-y-auto`；App.vue 的 main 是 `overflow-hidden`，不允许整页滚动
 - 滚动条已全局隐藏（`src/main.css` 的 `::-webkit-scrollbar { display: none }`），勿写 `overflow: hidden` 禁用滚动能力
 - 路由用 `createMemoryHistory`（uTools 从本地文件加载页面）；顶部导航项由路由 meta 的 label / icon 派生（`src/router/index.js` 的 `navigationTabs`），勿在 App.vue 里另建一份 path 列表
-- skill 开关是「乐观更新 + 300ms 防抖 + 失败回滚」，preload 侧写操作全局串行；勿在开关路径上引入同步等待
+- skill 开关是「乐观更新 + 300ms 防抖 + 失败回滚」，preload 侧写操作全局串行；外部状态合并（`applyState`）必须同步调用 `queue.syncCommitted` 更新回滚基线，且勿在开关路径上引入同步等待
 
 ## 验证方式
 

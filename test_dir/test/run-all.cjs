@@ -18,6 +18,7 @@ const MODULES = [
   "06-settings.cjs",
   "07-manual-changes.cjs",
   "08-skill-queue.mjs",
+  "09-copy-mode.cjs",
 ];
 
 const results = [];

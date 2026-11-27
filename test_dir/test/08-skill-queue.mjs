@@ -33,6 +33,7 @@ function createQueueHarness(options = {}) {
   const selections = new Map([["agent-1", ["alpha"]]]);
   const commits = [];
   const errors = [];
+  const reportedIssues = [];
   let remainingFailures = failTimes;
   const queue = createSkillQueue({
     getSelection: (agentId) => selections.get(agentId) || [],
@@ -47,12 +48,14 @@ function createQueueHarness(options = {}) {
       return {
         enabledSkills: { [agentId]: [...skillIds] },
         agentIssues: { [agentId]: [] },
+        issues: options.topIssues || [],
       };
     },
-    onIssues: () => undefined,
+    onIssues: (agentId, agentIssues, allIssues) =>
+      reportedIssues.push({ agentId, agentIssues, allIssues }),
     onError: (error) => errors.push(error.message),
   });
-  return { commits, errors, queue, selections };
+  return { commits, errors, queue, reportedIssues, selections };
 }
 
 async function main() {
@@ -187,6 +190,37 @@ async function main() {
     h.queue.cancel("agent-1");
     await delay(500);
     reporter.check("4.10", "取消后不再提交该 Agent 的选择", h.commits.length === 0);
+  }
+
+  // [5.8 / 5.11 回归] syncCommitted 更新回滚基线，且透传顶层 issues
+  {
+    const h = createQueueHarness({
+      topIssues: [{ type: "warning", message: "部分选择已失效并自动忽略" }],
+    });
+    h.queue.setSkills("agent-1", ["alpha", "beta"]);
+    await delay(450);
+    reporter.check(
+      "5.11",
+      "onIssues 透传服务端顶层 issues（含失效选择警告）",
+      h.reportedIssues.at(-1)?.allIssues?.some((i) =>
+        i.message.includes("部分选择已失效"),
+      ),
+      JSON.stringify(h.reportedIssues),
+    );
+  }
+  {
+    const h = createQueueHarness({ failTimes: 1 });
+    // 模拟外部刷新把 agent-1 的已启用列表清空为 []
+    h.selections.set("agent-1", []);
+    h.queue.syncCommitted({ "agent-1": [] });
+    h.queue.setSkills("agent-1", ["gamma"]);
+    await delay(450);
+    reporter.check(
+      "5.8",
+      "外部同步后提交失败会回滚到最新基线（而非刷新前旧值）",
+      h.selections.get("agent-1").length === 0,
+      JSON.stringify(h.selections.get("agent-1")),
+    );
   }
 
   reporter.finish();

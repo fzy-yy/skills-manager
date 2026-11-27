@@ -140,7 +140,7 @@ function openSkillFolder(skill) {
       <p class="m-0 min-w-0 flex-1 leading-6">
         仓库本次未检测到任何
         Skill。若确认仓库已清空，可以清理失效的分组引用、Agent
-        启用记录与本应用创建的链接；仓库文件不会被删除。
+        启用记录与本应用创建的链接或受管副本；仓库文件不会被删除。
       </p>
       <button
         class="inline-flex h-9 items-center justify-center rounded-md border border-warning bg-surface px-3 font-semibold whitespace-nowrap text-warning hover:bg-canvas disabled:cursor-not-allowed disabled:opacity-50"
